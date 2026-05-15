@@ -296,6 +296,7 @@ impl SuiClient {
         source_branch: &str,
         target_branch: &str,
         source_blob_id: &str,
+        source_git_head: &str,
     ) -> Result<(String, GasCost)> {
         let repo_v = self.queries.get_initial_shared_version(repo_id).await?;
         let acl_v = self.queries.get_initial_shared_version(acl_id).await?;
@@ -305,6 +306,7 @@ impl SuiClient {
             Arg::pure(&source_branch.to_string())?,
             Arg::pure(&target_branch.to_string())?,
             Arg::pure(&source_blob_id.to_string())?,
+            Arg::pure(&source_git_head.to_string())?,
             Arg::clock(),
         ];
         let result = self

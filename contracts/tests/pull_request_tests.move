@@ -88,6 +88,7 @@ fun open_pr(scenario: &mut Scenario, author: address) {
             string::utf8(b"feature"),
             string::utf8(b"main"),
             string::utf8(b"sourceblobid"),
+            string::utf8(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
             &clock,
             ts::ctx(scenario),
         );

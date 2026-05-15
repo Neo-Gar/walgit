@@ -81,6 +81,9 @@ pub struct PullRequestRecord {
     pub source_branch: String,
     pub target_branch: String,
     pub source_blob_id: String,
+    /// Git SHA1 of the PR's source tip — set on chain at create time so the
+    /// maintainer can `git merge --ff-only <sha>` after unpacking the blob.
+    pub source_git_head: String,
     /// 0 = open, 1 = merged, 2 = closed
     pub status: u8,
     pub approved: bool,

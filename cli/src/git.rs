@@ -359,12 +359,16 @@ pub fn object_exists(repo_path: &Path, hash: &str) -> bool {
 /// Find the tip commit reachable in the repo but not from `target_branch`.
 /// Used after unpacking a source packfile to identify the PR source tip.
 pub fn find_foreign_tip(repo_path: &Path, target_branch: &str) -> Result<String> {
+    // Use `^<branch>` exclusion syntax — `--not=<branch>` is not a valid
+    // `git log` flag (the old code happened to slip through on older gits but
+    // modern git rejects it).
+    let exclude = format!("^{}", target_branch);
     let out = run(
         Command::new("git")
             .args([
                 "log",
                 "--all",
-                &format!("--not={}", target_branch),
+                &exclude,
                 "--format=%H",
                 "--max-count=1",
                 "--topo-order",

@@ -52,6 +52,7 @@ public struct PRCreated has copy, drop {
     source_branch: String,
     target_branch: String,
     source_blob_id: String,
+    source_git_head: String,
     created_at: u64,
 }
 
@@ -89,6 +90,10 @@ public struct PullRequest has key {
     target_branch: String,
     /// Walrus blob_id of the packfile containing the proposed changes
     source_blob_id: String,
+    /// Git SHA1 (40-char hex) of the PR's tip commit. Lets the maintainer
+    /// run `git merge --ff-only <sha>` after unpacking the Walrus blob —
+    /// without this the dangling commit can't be addressed by any ref.
+    source_git_head: String,
     status: u8,
     approved: bool,
     approved_by: Option<address>,
@@ -114,6 +119,7 @@ public fun create_pull_request(
     source_branch: String,
     target_branch: String,
     source_blob_id: String,
+    source_git_head: String,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -141,6 +147,7 @@ public fun create_pull_request(
         source_branch,
         target_branch,
         source_blob_id,
+        source_git_head,
         status: STATUS_OPEN,
         approved: false,
         approved_by: option::none(),
@@ -159,6 +166,7 @@ public fun create_pull_request(
         source_branch: pr.source_branch,
         target_branch: pr.target_branch,
         source_blob_id: pr.source_blob_id,
+        source_git_head: pr.source_git_head,
         created_at: now,
     });
 
@@ -285,6 +293,8 @@ public fun get_pr_source_branch(pr: &PullRequest): String { pr.source_branch }
 public fun get_pr_target_branch(pr: &PullRequest): String { pr.target_branch }
 
 public fun get_pr_source_blob_id(pr: &PullRequest): String { pr.source_blob_id }
+
+public fun get_pr_source_git_head(pr: &PullRequest): String { pr.source_git_head }
 
 public fun get_pr_number(pr: &PullRequest): u64 { pr.number }
 

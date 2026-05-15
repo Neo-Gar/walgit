@@ -178,6 +178,7 @@ pub async fn create(
             &source_branch,
             &target_branch,
             &upload.blob_id,
+            &source_tip,
         )
         .await?;
     pb.finish_and_clear();
@@ -333,6 +334,9 @@ pub async fn show(pr_id: String) -> Result<()> {
     if !pr.source_blob_id.is_empty() {
         println!("  {} {}", ui::label("blob     "), pr.source_blob_id);
     }
+    if !pr.source_git_head.is_empty() {
+        println!("  {} {}", ui::label("source tip"), pr.source_git_head);
+    }
     if let Some(b) = &pr.merge_commit_blob_id {
         println!("  {} {}", ui::label("merge    "), b);
     }
@@ -425,7 +429,14 @@ pub async fn merge(pr_id: String) -> Result<()> {
     };
 
     git::unpack_objects(&repo_dir, &pack)?;
-    let source_tip = git::find_foreign_tip(&repo_dir, &pr.target_branch)?;
+    // Prefer the PR's recorded source tip — after `unpack_objects` the new
+    // commits are dangling (no ref pointing at them), so `git log --all` would
+    // miss them. The chain knows the SHA explicitly.
+    let source_tip = if !pr.source_git_head.is_empty() {
+        pr.source_git_head.clone()
+    } else {
+        git::find_foreign_tip(&repo_dir, &pr.target_branch)?
+    };
     git::merge_fast_forward(&repo_dir, &pr.target_branch, &source_tip)?;
 
     let merge_pack = git::pack_objects(&repo_dir)?;

@@ -517,6 +517,7 @@ impl Queries {
                 source_branch,
                 target_branch,
                 source_blob_id: String::new(),
+                source_git_head: String::new(),
                 status: 0,
                 approved: false,
                 approved_by: None,
@@ -528,6 +529,7 @@ impl Queries {
                 rec.status = full.status;
                 rec.approved = full.approved;
                 rec.source_blob_id = full.source_blob_id;
+                rec.source_git_head = full.source_git_head;
             }
             records.push(rec);
         }
@@ -630,6 +632,10 @@ impl Queries {
             source_branch: fields["source_branch"].as_str().unwrap_or("").to_string(),
             target_branch: fields["target_branch"].as_str().unwrap_or("").to_string(),
             source_blob_id: fields["source_blob_id"].as_str().unwrap_or("").to_string(),
+            source_git_head: fields["source_git_head"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             status,
             approved: fields["approved"].as_bool().unwrap_or(false),
             approved_by: parse_option_str(&fields["approved_by"]),

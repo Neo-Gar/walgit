@@ -1,0 +1,11 @@
+[package]
+name = "walgit"
+edition = "2024.beta"
+license = "Apache-2.0"
+authors = ["Nikita Vatletsov"]
+
+[addresses]
+walgit = "0x0"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }

@@ -1,0 +1,18 @@
+[package]
+name = "git-remote-walgit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Git remote helper for walgit:// URIs"
+
+[[bin]]
+name = "git-remote-walgit"
+path = "src/main.rs"
+
+[dependencies]
+walgit = { path = "../cli" }
+tokio.workspace = true
+anyhow.workspace = true
+console.workspace = true

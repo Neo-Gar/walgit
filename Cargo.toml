@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["cli", "git-remote"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Nikita Vatletsov"]
+repository = "https://github.com/Neo-Gar/walgit"
+description = "Decentralized Git hosting on Walrus (blob storage) + Sui (smart contracts)"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+console = "0.16"
+indicatif = "0.17"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+bcs = "0.2"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Filesystem & utilities
+dirs = "6"
+hex = "0.4"
+base64 = "0.22"
+chrono = "0.4"
+rand = "0.8"
+
+# Sui ecosystem
+sui-graphql = "0.3"
+sui-sdk-types = "0.3"
+
+# Crypto for Seal IBE
+seal-crypto = { git = "https://github.com/MystenLabs/seal", package = "crypto" }
+seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c", features = ["aes"] }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c" }
+
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake2 = "0.10"
+
+[patch."https://github.com/MystenLabs/sui-rust-sdk.git"]
+sui-sdk-types = { version = "=0.3.1" }

@@ -1,0 +1,43 @@
+[package]
+name = "walgit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[lib]
+name = "walgit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "walgit"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+clap.workspace = true
+console.workspace = true
+indicatif.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+bcs.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+hex.workspace = true
+base64.workspace = true
+chrono.workspace = true
+rand.workspace = true
+sui-graphql.workspace = true
+sui-sdk-types.workspace = true
+seal-crypto.workspace = true
+seal-sdk.workspace = true
+fastcrypto.workspace = true
+fastcrypto-tbls.workspace = true
+ed25519-dalek.workspace = true
+blake2.workspace = true

@@ -80,6 +80,34 @@ pub fn dim(msg: impl AsRef<str>) -> String {
     format!("{}", style(msg.as_ref()).dim())
 }
 
+// ─── stderr variants for git-remote helper, where stdout is reserved for the
+//     git protocol. Functionally identical to the println-based ones above,
+//     just routed to stderr.
+
+pub fn eheader(title: &str) {
+    let width = Term::stderr().size().1 as usize;
+    let title_part = format!(" {} ", title);
+    let dashes = width.saturating_sub(title_part.len() + 4).max(8);
+    eprintln!(
+        "{}{}{}",
+        style("── ").cyan().dim(),
+        style(title).cyan().bold(),
+        style(format!(" {}", "─".repeat(dashes))).cyan().dim()
+    );
+}
+
+pub fn esuccess(msg: impl AsRef<str>) {
+    eprintln!("  {} {}", style("✓").green().bold(), msg.as_ref());
+}
+
+pub fn einfo(msg: impl AsRef<str>) {
+    eprintln!("  {} {}", style("·").cyan(), msg.as_ref());
+}
+
+pub fn estep(msg: impl AsRef<str>) {
+    eprintln!("  {} {}", style("→").cyan().bold(), msg.as_ref());
+}
+
 pub fn label(s: &str) -> String {
     format!("{}", style(s).cyan())
 }

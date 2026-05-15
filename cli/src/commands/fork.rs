@@ -85,6 +85,8 @@ pub async fn run(url: String, description: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?.join(&name);
     std::fs::create_dir_all(&cwd)?;
     git::init(&cwd)?;
+    let remote_url = format!("walgit://{}/{}", ctx.active_address, name);
+    git::set_remote(&cwd, "origin", &remote_url)?;
     let walgit_dir = cwd.join(".walgit");
     let cfg = LocalRepoConfig {
         name: name.clone(),

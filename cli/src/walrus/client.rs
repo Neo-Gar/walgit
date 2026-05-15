@@ -193,15 +193,19 @@ async fn perform_download(http: &Client, url: &str, blob_id: &str) -> Result<Vec
 }
 
 fn report_upload(pb: &ProgressBar, out: &UploadResult, size: usize, epochs: u32) {
+    // Clear the spinner first so its line doesn't collide with the success
+    // message — `finish_with_message` leaves residue that bleeds into the
+    // next eprintln when called from contexts like git-remote-walgit.
+    pb.finish_and_clear();
     let short = &out.blob_id[..12.min(out.blob_id.len())];
     if out.rebate {
-        pb.finish_with_message(format!(
-            "✓ Blob {} already on Walrus — storage rebate (no charge)",
+        ui::esuccess(format!(
+            "blob {} already on Walrus — storage rebate (no charge)",
             short
         ));
     } else {
-        pb.finish_with_message(format!(
-            "✓ Uploaded {} → {} ({} epoch{})",
+        ui::esuccess(format!(
+            "uploaded {} → {} ({} epoch{})",
             ui::fmt_bytes(size),
             short,
             epochs,

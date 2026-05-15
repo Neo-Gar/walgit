@@ -208,6 +208,46 @@ pub fn has_any_commits(repo_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Look up a configured remote URL. Returns Ok(None) if the remote doesn't
+/// exist, Err only on subprocess failure.
+pub fn get_remote_url(repo_path: &Path, name: &str) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", name])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("git remote get-url failed: {}", e)),
+        })?;
+    if out.status.success() {
+        Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    } else {
+        // exit 2 = remote doesn't exist; treat any non-success as "absent".
+        Ok(None)
+    }
+}
+
+/// Idempotently set a git remote: adds it if missing, otherwise updates the URL.
+pub fn set_remote(repo_path: &Path, name: &str, url: &str) -> Result<()> {
+    if get_remote_url(repo_path, name)?.is_some() {
+        let out = run(
+            Command::new("git")
+                .args(["remote", "set-url", name, url])
+                .current_dir(repo_path),
+            "git remote set-url",
+        )?;
+        ensure_ok(&out, "git remote set-url")
+    } else {
+        let out = run(
+            Command::new("git")
+                .args(["remote", "add", name, url])
+                .current_dir(repo_path),
+            "git remote add",
+        )?;
+        ensure_ok(&out, "git remote add")
+    }
+}
+
 pub fn checkout(repo_path: &Path, commit_hash: &str) -> Result<()> {
     let head_path = repo_path.join(".git").join("HEAD");
     std::fs::write(&head_path, format!("{}\n", commit_hash))?;

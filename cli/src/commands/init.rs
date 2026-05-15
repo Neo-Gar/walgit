@@ -125,11 +125,22 @@ pub async fn run(
     };
     save_repo_config(&walgit_dir, &cfg)?;
 
+    // Wire up the `origin` git remote so the user can `git push` immediately
+    // without having to remember the walgit:// URL. set_remote is idempotent:
+    // it updates the URL if origin already exists (e.g. on re-init).
+    let remote_url = format!("walgit://{}/{}", ctx.active_address, name);
+    let remote_action = match git::get_remote_url(&repo_dir, "origin")? {
+        Some(_) => "updated remote 'origin'",
+        None => "added remote 'origin'",
+    };
+    git::set_remote(&repo_dir, "origin", &remote_url)?;
+
     ui::success(format!(
         "created {} ({})",
         ui::highlight(&name),
         if private { "private" } else { "public" }
     ));
+    ui::success(format!("{} → {}", remote_action, ui::highlight(&remote_url)));
 
     ui::header("summary");
     println!(
@@ -160,17 +171,10 @@ pub async fn run(
         );
     }
     println!(
-        "    {} {}",
+        "    {} {}    {}",
         ui::dim("$"),
-        ui::highlight(&format!(
-            "git remote add origin walgit://{}/{}",
-            ctx.active_address, name
-        ))
-    );
-    println!(
-        "    {} {}",
-        ui::dim("$"),
-        ui::highlight("git push -u origin main")
+        ui::highlight("git push -u origin main"),
+        ui::dim("# remote 'origin' is already configured"),
     );
     println!();
 

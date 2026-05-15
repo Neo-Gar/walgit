@@ -12,11 +12,12 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use walgit::config::{LocalRepoConfig, load_repo_config, save_repo_config};
 use walgit::sui::keystore;
+use walgit::ui;
 
 fn print_error(e: &anyhow::Error) {
     let msg = format!("{:#}", e);
+    eprintln!();
     if msg.starts_with("access denied:") || msg.starts_with("Access denied:") {
-        eprintln!();
         let (first, rest) = msg.split_once('\n').unwrap_or((&msg, ""));
         eprintln!(
             "  {} {}",
@@ -34,10 +35,14 @@ fn print_error(e: &anyhow::Error) {
                 eprintln!("  {}", console::style(line).dim());
             }
         }
-        eprintln!();
     } else {
-        eprintln!("git-remote-walgit: error: {}", msg);
+        eprintln!(
+            "  {} {}",
+            console::style("✗").red().bold(),
+            console::style(msg).red()
+        );
     }
+    eprintln!();
 }
 
 fn main() {
@@ -112,10 +117,12 @@ async fn run() -> Result<()> {
 
             "list" | "list for-push" => {
                 if sui_repo.is_none() {
-                    eprintln!(
-                        "git-remote-walgit: looking up {}/{} on Sui…",
-                        owner, repo_name
-                    );
+                    ui::eheader("resolving");
+                    ui::einfo(format!(
+                        "looking up {}/{} on Sui",
+                        ui::highlight(&owner),
+                        ui::highlight(&repo_name)
+                    ));
 
                     let walgit_dir = repo_dir.join(".walgit");
                     let local_id = if walgit_dir.exists() {
@@ -204,8 +211,10 @@ async fn run() -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!(
-                                "git-remote-walgit: warning: could not fetch commit {}: {}",
-                                commit_id, e
+                                "  {} could not fetch commit {}: {}",
+                                console::style("!").yellow().bold(),
+                                commit_id,
+                                e
                             );
                         }
                     }
@@ -348,14 +357,15 @@ async fn do_fetch(
     }
 
     if blobs_to_download.is_empty() {
-        eprintln!("git-remote-walgit: already up to date");
+        ui::einfo("already up to date");
         return Ok(());
     }
 
-    eprintln!(
-        "git-remote-walgit: fetching {} blob(s) from Walrus…",
+    ui::eheader("fetch");
+    ui::estep(format!(
+        "fetching {} blob(s) from Walrus",
         blobs_to_download.len()
-    );
+    ));
 
     for (blob_id, _) in &blobs_to_download {
         let raw = walrus.download(blob_id).await.with_context(|| {
@@ -391,7 +401,7 @@ async fn do_fetch(
         walgit::git::unpack_objects(repo_dir, &data)?;
     }
 
-    eprintln!("git-remote-walgit: done.");
+    ui::esuccess("fetch complete");
     Ok(())
 }
 
@@ -436,14 +446,12 @@ async fn do_push(
     let git_head = walgit::git::rev_parse(repo_dir, src_ref)?;
     let message = walgit::git::get_commit_message(repo_dir, &git_head)?;
 
-    eprintln!(
-        "git-remote-walgit: packing {} ({})…",
-        branch,
-        &git_head[..8]
-    );
+    ui::eheader(&format!("push  {} → {}", branch, &git_head[..8]));
+    ui::estep("packing git objects");
     let raw_pack = walgit::git::pack_objects(repo_dir)?;
 
     let pack_data = if repo_cfg.private {
+        ui::estep("encrypting with Seal IBE");
         let seal = walgit::SealClient::new(
             net.sui.graphql_url.clone(),
             net.seal.key_server_id.clone(),
@@ -455,13 +463,11 @@ async fn do_push(
     };
 
     let upload = walrus.upload(pack_data, repo_cfg.epochs).await?;
-    if upload.rebate {
-        eprintln!("git-remote-walgit: storage rebate — blob unchanged");
-    }
 
     // Parent = current branch head on chain (no reliance on local cache).
     let parent = sui.get_repo_branch_head(&repo_cfg.id, branch).await?;
 
+    ui::estep("recording commit on Sui");
     let (commit_id, _gas) = sui
         .push_commit(
             &kp,
@@ -491,12 +497,12 @@ async fn do_push(
     });
     save_repo_config(walgit_dir, &updated)?;
 
-    eprintln!(
-        "git-remote-walgit: pushed {} → blob {} / commit {}",
-        &git_head[..8],
-        &upload.blob_id[..12.min(upload.blob_id.len())],
-        &commit_id[..12.min(commit_id.len())]
-    );
+    ui::esuccess(format!(
+        "pushed {} → blob {} · commit {}",
+        ui::highlight(&git_head[..8].to_string()),
+        console::style(&upload.blob_id[..12.min(upload.blob_id.len())]).cyan(),
+        console::style(&commit_id[..12.min(commit_id.len())]).cyan(),
+    ));
 
     Ok(())
 }

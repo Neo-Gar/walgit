@@ -76,6 +76,10 @@ impl CommandContext {
 ///   3. `package_id` is set for the active network
 ///   4. Sui keystore + `client.yaml` are readable and an active address resolves
 pub fn preflight() -> Result<()> {
+    // Verify git is recent enough before anything else — older gits silently
+    // misbehave on `--end-of-options` and a few other flags we rely on.
+    let _ = crate::git::check_version()?;
+
     let config = crate::config::load()?;
     let _ = config.active_network()?;
     let _ = config.package_id()?;

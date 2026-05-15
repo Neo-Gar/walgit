@@ -8,6 +8,82 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+/// Lowest git that supports `--end-of-options` universally across the
+/// subcommands we touch (log, diff, rev-parse). Released 2020-12.
+pub const MIN_GIT_VERSION: (u32, u32, u32) = (2, 30, 0);
+
+/// Parse `git --version` and ensure it meets [`MIN_GIT_VERSION`]. Called from
+/// preflight so misconfigured machines fail before doing any work.
+pub fn check_version() -> Result<(u32, u32, u32)> {
+    let out = Command::new("git").arg("--version").output().map_err(|e| {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("failed to run git --version: {}", e)),
+        }
+    })?;
+    if !out.status.success() {
+        return Err(WalGitError::git("`git --version` exited non-zero"));
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let v = parse_git_version(&line).ok_or_else(|| {
+        WalGitError::git(format!("could not parse git version from: {}", line))
+    })?;
+    if v < MIN_GIT_VERSION {
+        return Err(WalGitError::git(format!(
+            "git {}.{}.{} is too old (need ≥ {}.{}.{}).\n\
+             macOS:  brew install git   then ensure `brew --prefix`/bin is on PATH\n\
+             Debian: sudo apt-get install git\n\
+             Other:  https://git-scm.com/downloads",
+            v.0, v.1, v.2, MIN_GIT_VERSION.0, MIN_GIT_VERSION.1, MIN_GIT_VERSION.2,
+        )));
+    }
+    Ok(v)
+}
+
+/// Extract `(major, minor, patch)` from strings like
+/// `git version 2.50.1 (Apple Git-155)` or `git version 2.30.2`.
+fn parse_git_version(s: &str) -> Option<(u32, u32, u32)> {
+    let body = s.strip_prefix("git version ")?;
+    let token = body.split_whitespace().next()?;
+    let mut parts = token.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch_str = parts.next().unwrap_or("0");
+    // Some distros append `-<release>`; trim that.
+    let patch_str = patch_str.split('-').next().unwrap_or("0");
+    let patch: u32 = patch_str.parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_apple_git() {
+        assert_eq!(
+            parse_git_version("git version 2.50.1 (Apple Git-155)"),
+            Some((2, 50, 1))
+        );
+    }
+    #[test]
+    fn parses_plain() {
+        assert_eq!(parse_git_version("git version 2.30.2"), Some((2, 30, 2)));
+    }
+    #[test]
+    fn parses_distro_suffix() {
+        assert_eq!(
+            parse_git_version("git version 2.39.5-debian-1"),
+            Some((2, 39, 5))
+        );
+    }
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_git_version("hg version 2.30.0"), None);
+        assert_eq!(parse_git_version("git version"), None);
+    }
+}
+
 fn run(cmd: &mut Command, label: &str) -> Result<Output> {
     let out = cmd.output().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
@@ -194,11 +270,13 @@ pub fn unpack_objects(repo_path: &Path, pack_data: &[u8]) -> Result<()> {
 }
 
 pub fn rev_parse(repo_path: &Path, refname: &str) -> Result<String> {
-    // `--end-of-options` stops git from interpreting `refname` as a flag if
-    // it starts with `-`. Belt-and-suspenders alongside upstream validators.
+    // NOTE: `git rev-parse` is unusual — it literally echoes any unknown arg
+    // (including `--end-of-options`) instead of treating it as a separator.
+    // We rely on upstream validators (`crate::validate::repo_name` etc.) to
+    // ensure `refname` never starts with `-`.
     let out = run(
         Command::new("git")
-            .args(["rev-parse", "--end-of-options", refname])
+            .args(["rev-parse", refname])
             .current_dir(repo_path),
         "git rev-parse",
     )?;

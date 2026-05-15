@@ -1,0 +1,18 @@
+[package]
+name = "walgit-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Model Context Protocol server for WalGit — exposes the CLI as agent-callable tools"
+
+[[bin]]
+name = "walgit-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

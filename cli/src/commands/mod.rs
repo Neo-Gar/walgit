@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 pub struct CommandContext {
     pub config: Config,
     pub package_id: String,
+    pub registry_id: String,
     pub sui: SuiClient,
     pub walrus: WalrusClient,
     pub active_address: String,
@@ -32,12 +33,14 @@ impl CommandContext {
         let config = crate::config::load()?;
         let net = config.active_network()?.clone();
         let package_id = config.package_id()?.to_string();
+        let registry_id = config.registry_id()?.to_string();
         let sui = SuiClient::new(net.sui.graphql_url.clone())?;
         let walrus = WalrusClient::new(net.walrus.publisher_url, net.walrus.aggregator_url);
         let active_address = keystore::read_active_address(config.wallet_path.as_deref())?;
         Ok(Self {
             config,
             package_id,
+            registry_id,
             sui,
             walrus,
             active_address,
@@ -72,6 +75,7 @@ pub fn preflight() -> Result<()> {
     let config = crate::config::load()?;
     let _ = config.active_network()?;
     let _ = config.package_id()?;
+    let _ = config.registry_id()?;
     let _ = keystore::read_active_address(config.wallet_path.as_deref())?;
     Ok(())
 }

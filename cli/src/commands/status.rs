@@ -21,8 +21,8 @@ pub async fn run() -> Result<()> {
         println!("  {}", ui::dim(&repo.description));
     }
     println!();
-    println!("  {} {}", ui::label("id        "), ui::short_id(&repo.id));
-    println!("  {} {}", ui::label("owner     "), ui::short_id(&repo.owner));
+    println!("  {} {}", ui::label("id        "), &repo.id);
+    println!("  {} {}", ui::label("owner     "), &repo.owner);
     println!(
         "  {} {}",
         ui::label("visibility"),
@@ -43,7 +43,7 @@ pub async fn run() -> Result<()> {
                 "  {} {:<20} → {}",
                 ui::dim("·"),
                 ui::highlight(branch),
-                ui::short_id(commit_id)
+                commit_id
             );
         }
     }

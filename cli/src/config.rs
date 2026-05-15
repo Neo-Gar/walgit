@@ -31,6 +31,10 @@ pub struct NetworkConfig {
     /// Deployed WalGit Sui package ID — required for any on-chain operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
+    /// Shared `Registry` object id created by the package's `init`. Required
+    /// for `create_repository` / `fork_repository` / `delete_repository`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
     pub sui: SuiConfig,
     pub walrus: WalrusConfig,
     pub seal: SealConfig,
@@ -82,6 +86,7 @@ impl NetworkConfig {
     pub fn testnet() -> Self {
         Self {
             package_id: None,
+            registry_id: None,
             sui: SuiConfig {
                 graphql_url: "https://graphql.testnet.sui.io/graphql".to_string(),
                 rpc_url: "https://fullnode.testnet.sui.io:443".to_string(),
@@ -103,6 +108,7 @@ impl NetworkConfig {
     pub fn mainnet() -> Self {
         Self {
             package_id: None,
+            registry_id: None,
             sui: SuiConfig {
                 graphql_url: "https://graphql.sui.io/graphql".to_string(),
                 rpc_url: "https://fullnode.mainnet.sui.io:443".to_string(),
@@ -149,6 +155,19 @@ impl Config {
                 WalGitError::config(format!(
                     "package_id not configured for network '{}'.\n\
                      Run: walgit config --package-id <PACKAGE_ID>",
+                    self.network
+                ))
+            })
+    }
+
+    pub fn registry_id(&self) -> Result<&str> {
+        self.active_network()?
+            .registry_id
+            .as_deref()
+            .ok_or_else(|| {
+                WalGitError::config(format!(
+                    "registry_id not configured for network '{}'.\n\
+                     Run: walgit config --registry-id <REGISTRY_ID>",
                     self.network
                 ))
             })

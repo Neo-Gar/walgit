@@ -140,11 +140,14 @@ impl SuiClient {
         &self,
         kp: &KeyPair,
         package_id: &str,
+        registry_id: &str,
         name: &str,
         description: &str,
         is_private: bool,
     ) -> Result<(String, String, GasCost)> {
+        let registry_v = self.queries.get_initial_shared_version(registry_id).await?;
         let args = vec![
+            Arg::shared(registry_id, registry_v, true),
             Arg::pure(&name.to_string())?,
             Arg::pure(&description.to_string())?,
             Arg::pure(&is_private)?,
@@ -208,12 +211,17 @@ impl SuiClient {
         &self,
         kp: &KeyPair,
         package_id: &str,
+        registry_id: &str,
         original_repo_id: &str,
         name: &str,
         description: &str,
     ) -> Result<(String, String, GasCost)> {
-        let repo_v = self.queries.get_initial_shared_version(original_repo_id).await?;
+        let (registry_v, repo_v) = tokio::try_join!(
+            self.queries.get_initial_shared_version(registry_id),
+            self.queries.get_initial_shared_version(original_repo_id),
+        )?;
         let args = vec![
+            Arg::shared(registry_id, registry_v, true),
             Arg::shared(original_repo_id, repo_v, true),
             Arg::pure(&name.to_string())?,
             Arg::pure(&description.to_string())?,

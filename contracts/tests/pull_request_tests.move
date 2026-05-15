@@ -20,9 +20,14 @@ const PR_AUTHOR: address = @0xE;
 
 fun setup_public(scenario: &mut Scenario) {
     ts::next_tx(scenario, OWNER);
+    { walgit::init_for_testing(ts::ctx(scenario)); };
+
+    ts::next_tx(scenario, OWNER);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(scenario);
         let clock = clock::create_for_testing(ts::ctx(scenario));
         walgit::create_repository(
+            &mut registry,
             string::utf8(b"test-repo"),
             string::utf8(b""),
             false,
@@ -30,14 +35,20 @@ fun setup_public(scenario: &mut Scenario) {
             ts::ctx(scenario),
         );
         clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
     };
 }
 
 fun setup_private(scenario: &mut Scenario) {
     ts::next_tx(scenario, OWNER);
+    { walgit::init_for_testing(ts::ctx(scenario)); };
+
+    ts::next_tx(scenario, OWNER);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(scenario);
         let clock = clock::create_for_testing(ts::ctx(scenario));
         walgit::create_repository(
+            &mut registry,
             string::utf8(b"private-repo"),
             string::utf8(b""),
             true,
@@ -45,6 +56,7 @@ fun setup_private(scenario: &mut Scenario) {
             ts::ctx(scenario),
         );
         clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
     };
 }
 

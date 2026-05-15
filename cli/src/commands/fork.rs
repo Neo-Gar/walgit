@@ -47,6 +47,7 @@ pub async fn run(url: String, description: Option<String>) -> Result<()> {
         .fork_repository(
             &kp,
             &ctx.package_id,
+            &ctx.registry_id,
             &original.id,
             &name,
             &description.unwrap_or_else(|| original.description.clone()),

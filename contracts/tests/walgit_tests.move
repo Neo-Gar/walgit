@@ -14,11 +14,18 @@ const OTHER: address = @0xB;
 const FORKER: address = @0xC;
 const FORKER2: address = @0xD;
 
+/// Publish the package (creates the shared Registry) and then create
+/// the OWNER's main public repo.
 fun setup(scenario: &mut Scenario) {
     ts::next_tx(scenario, OWNER);
+    { walgit::init_for_testing(ts::ctx(scenario)); };
+
+    ts::next_tx(scenario, OWNER);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(scenario);
         let clock = clock::create_for_testing(ts::ctx(scenario));
         walgit::create_repository(
+            &mut registry,
             string::utf8(b"my-repo"),
             string::utf8(b"A test repository"),
             false,
@@ -26,14 +33,20 @@ fun setup(scenario: &mut Scenario) {
             ts::ctx(scenario),
         );
         clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
     };
 }
 
 fun setup_private(scenario: &mut Scenario) {
     ts::next_tx(scenario, OWNER);
+    { walgit::init_for_testing(ts::ctx(scenario)); };
+
+    ts::next_tx(scenario, OWNER);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(scenario);
         let clock = clock::create_for_testing(ts::ctx(scenario));
         walgit::create_repository(
+            &mut registry,
             string::utf8(b"private-repo"),
             string::utf8(b""),
             true,
@@ -41,15 +54,18 @@ fun setup_private(scenario: &mut Scenario) {
             ts::ctx(scenario),
         );
         clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
     };
 }
 
 fun do_fork(scenario: &mut Scenario, forker: address) {
     ts::next_tx(scenario, forker);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(scenario);
         let mut repo = ts::take_shared<walgit::Repository>(scenario);
         let clock = clock::create_for_testing(ts::ctx(scenario));
         walgit::fork_repository(
+            &mut registry,
             &mut repo,
             string::utf8(b"my-repo-fork"),
             string::utf8(b"a fork"),
@@ -58,6 +74,7 @@ fun do_fork(scenario: &mut Scenario, forker: address) {
         );
         clock::destroy_for_testing(clock);
         ts::return_shared(repo);
+        ts::return_shared(registry);
     };
 }
 
@@ -271,9 +288,11 @@ fun test_fork_private_repo_fails() {
 
     ts::next_tx(&mut scenario, FORKER);
     {
+        let mut registry = ts::take_shared<walgit::Registry>(&scenario);
         let mut repo = ts::take_shared<walgit::Repository>(&scenario);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
         walgit::fork_repository(
+            &mut registry,
             &mut repo,
             string::utf8(b"fork"),
             string::utf8(b""),
@@ -282,8 +301,109 @@ fun test_fork_private_repo_fails() {
         );
         clock::destroy_for_testing(clock);
         ts::return_shared(repo);
+        ts::return_shared(registry);
     };
 
+    ts::end(scenario);
+}
+
+// ─── Registry / uniqueness tests ──────────────────────────────────────────────
+
+#[test]
+#[expected_failure(abort_code = walgit::ENameTaken)]
+fun test_duplicate_name_same_owner_fails() {
+    let mut scenario = ts::begin(OWNER);
+    setup(&mut scenario);
+
+    // Second create_repository with the SAME name from the SAME owner must abort.
+    ts::next_tx(&mut scenario, OWNER);
+    {
+        let mut registry = ts::take_shared<walgit::Registry>(&scenario);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        walgit::create_repository(
+            &mut registry,
+            string::utf8(b"my-repo"),
+            string::utf8(b""),
+            false,
+            &clock,
+            ts::ctx(&mut scenario),
+        );
+        clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
+    };
+    ts::end(scenario);
+}
+
+#[test]
+fun test_same_name_different_owners_ok() {
+    let mut scenario = ts::begin(OWNER);
+    setup(&mut scenario);
+
+    // OTHER creates a repo with the same name — should succeed because
+    // uniqueness is scoped per (owner, name), not globally.
+    ts::next_tx(&mut scenario, OTHER);
+    {
+        let mut registry = ts::take_shared<walgit::Registry>(&scenario);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        walgit::create_repository(
+            &mut registry,
+            string::utf8(b"my-repo"),
+            string::utf8(b""),
+            false,
+            &clock,
+            ts::ctx(&mut scenario),
+        );
+        clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
+    };
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = walgit::ENameTaken)]
+fun test_fork_with_taken_name_fails() {
+    let mut scenario = ts::begin(OWNER);
+    setup(&mut scenario);
+
+    // FORKER first creates their own repo named "my-repo-fork".
+    ts::next_tx(&mut scenario, FORKER);
+    {
+        let mut registry = ts::take_shared<walgit::Registry>(&scenario);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        walgit::create_repository(
+            &mut registry,
+            string::utf8(b"my-repo-fork"),
+            string::utf8(b""),
+            false,
+            &clock,
+            ts::ctx(&mut scenario),
+        );
+        clock::destroy_for_testing(clock);
+        ts::return_shared(registry);
+    };
+
+    // FORKER tries to fork OWNER's repo into the SAME name → ENameTaken.
+    // Must explicitly take both Repository objects so we fork the right one
+    // (LIFO take_shared otherwise hands back FORKER's own repo).
+    ts::next_tx(&mut scenario, FORKER);
+    {
+        let mut registry = ts::take_shared<walgit::Registry>(&scenario);
+        let forkers_own = ts::take_shared<walgit::Repository>(&scenario);
+        let mut owners_repo = ts::take_shared<walgit::Repository>(&scenario);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        walgit::fork_repository(
+            &mut registry,
+            &mut owners_repo,
+            string::utf8(b"my-repo-fork"),
+            string::utf8(b""),
+            &clock,
+            ts::ctx(&mut scenario),
+        );
+        clock::destroy_for_testing(clock);
+        ts::return_shared(owners_repo);
+        ts::return_shared(forkers_own);
+        ts::return_shared(registry);
+    };
     ts::end(scenario);
 }
 

@@ -17,6 +17,30 @@ pub async fn run(
     ui::banner();
 
     let cwd = std::env::current_dir()?;
+
+    // Load context first so we can check the chain BEFORE any filesystem
+    // changes — otherwise a duplicate-name abort would leave a dangling
+    // empty directory or modified git state behind.
+    let ctx = CommandContext::load().await?;
+
+    // CLI-side early check for nicer UX — the contract enforces this too via
+    // the shared Registry, but failing here saves the user from creating a
+    // directory and a git repo only to abort on `create_repository`.
+    if let Some(existing) = ctx
+        .sui
+        .get_repo_by_owner_name(&ctx.package_id, &ctx.active_address, &name)
+        .await?
+    {
+        return Err(WalGitError::other(format!(
+            "you already own a repository named '{}' on this network (id: {}).\n\
+             Pick a different name, or use the existing repo (push url: walgit://{}/{}).",
+            name,
+            existing.id,
+            ctx.active_address,
+            name,
+        )));
+    }
+
     let repo_dir = if here {
         cwd.clone()
     } else {
@@ -93,7 +117,6 @@ pub async fn run(
 
     // ─── Step 3: register on Sui ──────────────────────────────────────────────
     ui::header("sui");
-    let ctx = CommandContext::load().await?;
     let net = ctx.config.active_network()?;
     let epochs = epochs.unwrap_or(net.walrus.epochs);
     let description = description.unwrap_or_default();
@@ -107,7 +130,14 @@ pub async fn run(
 
     let (repo_id, acl_id, gas) = ctx
         .sui
-        .create_repository(&kp, &ctx.package_id, &name, &description, private)
+        .create_repository(
+            &kp,
+            &ctx.package_id,
+            &ctx.registry_id,
+            &name,
+            &description,
+            private,
+        )
         .await?;
 
     pb.finish_and_clear();
@@ -146,12 +176,12 @@ pub async fn run(
     println!(
         "  {} {}",
         ui::label("repository id "),
-        ui::short_id(&repo_id)
+        &repo_id
     );
     println!(
         "  {} {}",
         ui::label("access control"),
-        ui::short_id(&acl_id)
+        &acl_id
     );
     println!("  {} {}", ui::label("network       "), ctx.config.network);
     println!("  {} {}", ui::label("epochs        "), epochs);

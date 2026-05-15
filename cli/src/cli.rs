@@ -65,6 +65,8 @@ pub enum Command {
         network: Option<String>,
         #[arg(long, value_name = "ID")]
         package_id: Option<String>,
+        #[arg(long, value_name = "ID")]
+        registry_id: Option<String>,
         #[arg(long, value_name = "URL")]
         graphql_url: Option<String>,
         #[arg(long, value_name = "URL")]

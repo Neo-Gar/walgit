@@ -9,6 +9,7 @@ use crate::ui;
 pub async fn run(
     network: Option<String>,
     package_id: Option<String>,
+    registry_id: Option<String>,
     graphql_url: Option<String>,
     publisher_url: Option<String>,
     aggregator_url: Option<String>,
@@ -28,6 +29,7 @@ pub async fn run(
     }
 
     if package_id.is_some()
+        || registry_id.is_some()
         || graphql_url.is_some()
         || publisher_url.is_some()
         || aggregator_url.is_some()
@@ -40,6 +42,9 @@ pub async fn run(
             .ok_or_else(|| WalGitError::config(format!("active network '{}' missing", active)))?;
         if let Some(p) = package_id {
             net.package_id = Some(p);
+        }
+        if let Some(r) = registry_id {
+            net.registry_id = Some(r);
         }
         if let Some(g) = graphql_url {
             net.sui.graphql_url = g;
@@ -69,6 +74,14 @@ pub async fn run(
             "  {} {}",
             ui::label("package_id "),
             net.package_id
+                .as_deref()
+                .map(ui::highlight)
+                .unwrap_or_else(|| ui::dim("(unset)"))
+        );
+        println!(
+            "  {} {}",
+            ui::label("registry_id"),
+            net.registry_id
                 .as_deref()
                 .map(ui::highlight)
                 .unwrap_or_else(|| ui::dim("(unset)"))

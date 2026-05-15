@@ -23,6 +23,7 @@ const ENoAccess: u64 = 1;
 const ESelfFork: u64 = 2;
 const EAlreadyForked: u64 = 3;
 const EAclMismatch: u64 = 4;
+const ENameTaken: u64 = 5;
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,52 @@ public struct AccessChanged has copy, drop {
     role: u8,
     /// true = granted, false = revoked
     granted: bool,
+}
+
+public struct RegistryCreated has copy, drop {
+    registry_id: ID,
+}
+
+// ─── One-time witness ─────────────────────────────────────────────────────────
+/// Required so `init` runs exactly once at package publish, creating the
+/// canonical shared `Registry` object for this package.
+public struct WALGIT has drop {}
+
+// ─── Registry — per-package (owner, name) uniqueness ──────────────────────────
+
+/// Composite key for the registry. `copy + drop + store` so the table can hold it.
+public struct RegistryKey has copy, drop, store {
+    owner: address,
+    name: String,
+}
+
+/// Shared registry guaranteeing that each `(owner, repository_name)` pair maps
+/// to at most one `Repository` object. Touched by every `create_repository`,
+/// `fork_repository`, and `delete_repository` call to keep its view of the
+/// world consistent with on-chain reality.
+public struct Registry has key {
+    id: UID,
+    /// (owner, name) → Repository ID
+    entries: Table<RegistryKey, ID>,
+}
+
+/// Run once at package publish. Creates and shares the canonical `Registry`.
+fun init(_witness: WALGIT, ctx: &mut TxContext) {
+    init_internal(ctx);
+}
+
+fun init_internal(ctx: &mut TxContext) {
+    let registry = Registry {
+        id: object::new(ctx),
+        entries: table::new(ctx),
+    };
+    event::emit(RegistryCreated { registry_id: object::id(&registry) });
+    transfer::share_object(registry);
+}
+
+#[test_only]
+public fun init_for_testing(ctx: &mut TxContext) {
+    init_internal(ctx);
 }
 
 // ─── Structs ──────────────────────────────────────────────────────────────────
@@ -160,7 +207,13 @@ entry fun seal_approve(id: vector<u8>, acl: &AccessControl, ctx: &TxContext) {
 /// so any authorized collaborator can push commits or reference them in PTBs.
 /// The repo UID is pre-allocated so the ACL can store the repo's ID,
 /// creating a bidirectional binding verified on every write.
+///
+/// `registry` enforces `(owner, name)` uniqueness across the package: a second
+/// `create_repository` call with the same name from the same address aborts
+/// with `ENameTaken`. This guarantees `walgit://owner/name` resolves to at
+/// most one repository.
 public fun create_repository(
+    registry: &mut Registry,
     name: String,
     description: String,
     is_private: bool,
@@ -169,8 +222,12 @@ public fun create_repository(
 ) {
     let sender = ctx.sender();
 
+    let key = RegistryKey { owner: sender, name };
+    assert!(!table::contains(&registry.entries, key), ENameTaken);
+
     let repo_uid = object::new(ctx);
     let repo_id = object::uid_to_inner(&repo_uid);
+    table::add(&mut registry.entries, key, repo_id);
 
     let acl = AccessControl {
         id: object::new(ctx),
@@ -275,7 +332,11 @@ public fun push_commit(
 }
 
 /// Fork a public repository into the caller's account.
+///
+/// The fork is registered in `registry` under `(sender, name)` and is
+/// subject to the same uniqueness rule as `create_repository`.
 public fun fork_repository(
+    registry: &mut Registry,
     original_repo: &mut Repository,
     name: String,
     description: String,
@@ -288,10 +349,14 @@ public fun fork_repository(
     assert!(sender != original_repo.owner, ESelfFork);
     assert!(!vec_set::contains(&original_repo.forked_by, &sender), EAlreadyForked);
 
+    let key = RegistryKey { owner: sender, name };
+    assert!(!table::contains(&registry.entries, key), ENameTaken);
+
     let original_repo_id = object::id(original_repo);
 
     let repo_uid = object::new(ctx);
     let fork_repo_id = object::uid_to_inner(&repo_uid);
+    table::add(&mut registry.entries, key, fork_repo_id);
 
     let acl = AccessControl {
         id: object::new(ctx),
@@ -331,9 +396,15 @@ public fun fork_repository(
     transfer::share_object(fork);
 }
 
-/// Delete a repository. Only the owner can delete.
-/// Branches Table must be empty.
-public fun delete_repository(repo: Repository, ctx: &TxContext) {
+/// Delete a repository. Only the owner can delete. Branches Table must be empty.
+///
+/// `registry` must be the canonical registry for this package; the registry
+/// entry `(owner, name)` is removed so the name becomes available again.
+public fun delete_repository(
+    registry: &mut Registry,
+    repo: Repository,
+    ctx: &TxContext,
+) {
     assert!(ctx.sender() == repo.owner, ENotOwner);
 
     let repo_id = object::id(&repo);
@@ -342,7 +413,7 @@ public fun delete_repository(repo: Repository, ctx: &TxContext) {
     let Repository {
         id,
         owner: _,
-        name: _,
+        name,
         description: _,
         is_private: _,
         branches,
@@ -354,7 +425,29 @@ public fun delete_repository(repo: Repository, ctx: &TxContext) {
     table::destroy_empty(branches);
     object::delete(id);
 
+    let key = RegistryKey { owner, name };
+    // Tolerate a missing entry rather than aborting — keeps `delete_repository`
+    // working even for legacy repos created before the registry existed.
+    if (table::contains(&registry.entries, key)) {
+        let _ = table::remove(&mut registry.entries, key);
+    };
+
     event::emit(RepositoryDeleted { repo_id, owner });
+}
+
+// ─── Registry views ────────────────────────────────────────────────────────────
+
+public fun registry_contains(registry: &Registry, owner: address, name: String): bool {
+    table::contains(&registry.entries, RegistryKey { owner, name })
+}
+
+public fun registry_lookup(registry: &Registry, owner: address, name: String): Option<ID> {
+    let key = RegistryKey { owner, name };
+    if (table::contains(&registry.entries, key)) {
+        option::some(*table::borrow(&registry.entries, key))
+    } else {
+        option::none()
+    }
 }
 
 // ─── Access control management ────────────────────────────────────────────────

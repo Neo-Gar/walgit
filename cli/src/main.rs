@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
         Command::Config {
             network,
             package_id,
+            registry_id,
             graphql_url,
             publisher_url,
             aggregator_url,
@@ -81,6 +82,7 @@ async fn main() -> Result<()> {
             walgit::commands::config_cmd::run(
                 network,
                 package_id,
+                registry_id,
                 graphql_url,
                 publisher_url,
                 aggregator_url,

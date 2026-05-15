@@ -16,7 +16,12 @@ pub struct Cli {
 pub enum Command {
     /// Create a new WalGit repository.
     Init {
+        /// Repository name. Without `--here`, a new directory `<name>/` is
+        /// created in the current working directory.
         name: String,
+        /// Initialise inside the current directory instead of creating `<name>/`.
+        #[arg(long)]
+        here: bool,
         #[arg(long)]
         description: Option<String>,
         #[arg(long)]

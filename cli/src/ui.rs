@@ -3,9 +3,46 @@
 
 //! Spinner and styled output for user-facing CLI commands.
 
-use console::style;
+use console::{Term, style};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{BufRead, Write};
 use std::time::Duration;
+
+/// Tagline shown under the banner.
+const TAGLINE: &str = "decentralized git on walrus + sui";
+
+const BANNER: &str = r"
+ ██╗    ██╗ █████╗ ██╗      ██████╗ ██╗████████╗
+ ██║    ██║██╔══██╗██║     ██╔════╝ ██║╚══██╔══╝
+ ██║ █╗ ██║███████║██║     ██║  ███╗██║   ██║
+ ██║███╗██║██╔══██║██║     ██║   ██║██║   ██║
+ ╚███╔███╔╝██║  ██║███████╗╚██████╔╝██║   ██║
+  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝";
+
+/// Print the WalGit banner in cyan with a tagline.
+pub fn banner() {
+    println!("{}", style(BANNER).cyan().bold());
+    println!("  {}", style(TAGLINE).dim());
+    println!();
+}
+
+/// Print a styled section header like `── init ──────────────────────`.
+pub fn header(title: &str) {
+    let width = Term::stdout().size().1 as usize;
+    let title_part = format!(" {} ", title);
+    let dashes = width.saturating_sub(title_part.len() + 4).max(8);
+    println!(
+        "{}{}{}",
+        style("── ").cyan().dim(),
+        style(title).cyan().bold(),
+        style(format!(" {}", "─".repeat(dashes))).cyan().dim()
+    );
+}
+
+pub fn divider() {
+    let width = Term::stdout().size().1 as usize;
+    println!("{}", style("─".repeat(width.min(60))).dim());
+}
 
 pub fn spinner(msg: impl Into<String>) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
@@ -27,8 +64,12 @@ pub fn info(msg: impl AsRef<str>) {
     println!("  {} {}", style("·").cyan(), msg.as_ref());
 }
 
+pub fn step(msg: impl AsRef<str>) {
+    println!("  {} {}", style("→").cyan().bold(), msg.as_ref());
+}
+
 pub fn warn(msg: impl AsRef<str>) {
-    eprintln!("  {} {}", style("!").yellow().bold(), msg.as_ref());
+    eprintln!("  {} {}", style("!").yellow().bold(), style(msg.as_ref()).yellow());
 }
 
 pub fn error(msg: impl AsRef<str>) {
@@ -37,6 +78,35 @@ pub fn error(msg: impl AsRef<str>) {
 
 pub fn dim(msg: impl AsRef<str>) -> String {
     format!("{}", style(msg.as_ref()).dim())
+}
+
+pub fn label(s: &str) -> String {
+    format!("{}", style(s).cyan())
+}
+
+pub fn highlight(s: &str) -> String {
+    format!("{}", style(s).bold())
+}
+
+/// Interactively ask a yes/no question on stdin. `default_yes = true` means
+/// pressing enter accepts.
+pub fn prompt_yes_no(question: &str, default_yes: bool) -> std::io::Result<bool> {
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!(
+        "  {} {} {} ",
+        style("?").yellow().bold(),
+        question,
+        style(hint).dim()
+    );
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim().to_lowercase();
+    Ok(match trimmed.as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    })
 }
 
 pub fn fmt_bytes(n: usize) -> String {

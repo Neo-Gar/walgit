@@ -151,14 +151,18 @@ impl SuiClient {
             Arg::clock(),
         ];
         let result = self.exec(kp, package_id, "walgit", "create_repository", args).await?;
-        let repo = result
-            .find_created("::walgit::Repository")
-            .ok_or_else(|| WalGitError::sui_transaction("Repository object not created".to_string()))?;
-        let acl = result
-            .find_created("::walgit::AccessControl")
-            .ok_or_else(|| {
-                WalGitError::sui_transaction("AccessControl object not created".to_string())
-            })?;
+        let repo = result.find_created("::walgit::Repository").ok_or_else(|| {
+            WalGitError::sui_transaction(format!(
+                "could not identify Repository among created objects: [{}]",
+                result.created_summary()
+            ))
+        })?;
+        let acl = result.find_created("::walgit::AccessControl").ok_or_else(|| {
+            WalGitError::sui_transaction(format!(
+                "could not identify AccessControl among created objects: [{}]",
+                result.created_summary()
+            ))
+        })?;
         Ok((repo.object_id.clone(), acl.object_id.clone(), result.gas))
     }
 

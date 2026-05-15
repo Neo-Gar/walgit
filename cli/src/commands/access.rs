@@ -16,17 +16,34 @@ pub async fn list() -> Result<()> {
     let ctx = CommandContext::load().await?;
     let acl = ctx.sui.get_access_control(acl_id).await?;
 
+    ui::header("access");
+    println!("  {} {}", ui::label("owner  "), ui::highlight(&acl.owner));
+
     println!();
-    ui::info(format!("owner:   {}", acl.owner));
-    println!();
-    ui::info(format!("readers ({}):", acl.allowed_readers.len()));
-    for r in &acl.allowed_readers {
-        println!("    {} {}", ui::dim("·"), r);
+    println!(
+        "  {} ({})",
+        ui::label("readers"),
+        acl.allowed_readers.len()
+    );
+    if acl.allowed_readers.is_empty() {
+        println!("    {}", ui::dim("(none)"));
+    } else {
+        for r in &acl.allowed_readers {
+            println!("    {} {}", ui::dim("·"), r);
+        }
     }
     println!();
-    ui::info(format!("writers ({}):", acl.allowed_writers.len()));
-    for w in &acl.allowed_writers {
-        println!("    {} {}", ui::dim("·"), w);
+    println!(
+        "  {} ({})",
+        ui::label("writers"),
+        acl.allowed_writers.len()
+    );
+    if acl.allowed_writers.is_empty() {
+        println!("    {}", ui::dim("(none)"));
+    } else {
+        for w in &acl.allowed_writers {
+            println!("    {} {}", ui::dim("·"), w);
+        }
     }
     Ok(())
 }

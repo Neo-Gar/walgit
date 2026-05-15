@@ -8,13 +8,44 @@ use walgit::cli::{AccessAction, Cli, Command, PrAction};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Fail fast if global config is incomplete — before any command creates
+    // directories, makes network calls, or uploads to Walrus. `config` is the
+    // tool used to fix the problem, so it's exempt.
+    if !matches!(cli.command, Command::Config { .. }) {
+        if let Err(e) = walgit::commands::preflight() {
+            eprintln!();
+            eprintln!(
+                "  {} {}",
+                console::style("✗").red().bold(),
+                console::style("walgit is not configured yet").red().bold()
+            );
+            eprintln!("    {}", console::style(format!("{}", e)).dim());
+            eprintln!();
+            eprintln!("  Try:");
+            eprintln!(
+                "    {} {}",
+                console::style("$").dim(),
+                console::style("walgit config --show").cyan()
+            );
+            eprintln!(
+                "    {} {}",
+                console::style("$").dim(),
+                console::style("walgit config --package-id <PACKAGE_ID>").cyan()
+            );
+            eprintln!();
+            std::process::exit(1);
+        }
+    }
+
     match cli.command {
         Command::Init {
             name,
+            here,
             description,
             private,
             epochs,
-        } => walgit::commands::init::run(name, description, private, epochs).await?,
+        } => walgit::commands::init::run(name, here, description, private, epochs).await?,
         Command::Log { limit } => walgit::commands::log::run(limit).await?,
         Command::Status => walgit::commands::status::run().await?,
         Command::Access { action } => match action {

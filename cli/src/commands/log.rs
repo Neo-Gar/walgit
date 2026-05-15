@@ -32,24 +32,22 @@ pub async fn run(limit: usize) -> Result<()> {
         .clone();
     let commits = ctx.sui.get_commit_chain(&head_id, limit).await?;
 
-    println!();
-    println!("  {} ({} commits)", branch, commits.len());
-    println!();
+    ui::header(&format!("log — {} ({} commits)", branch, commits.len()));
     for c in commits {
         let dt = DateTime::<Utc>::from_timestamp_millis(c.timestamp as i64)
             .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_default();
         println!(
-            "  {} {}",
-            ui::short_hash(&c.git_head),
-            ui::dim(&c.message),
+            "  {}  {}",
+            console::style(ui::short_hash(&c.git_head)).yellow(),
+            ui::highlight(&c.message),
         );
         println!(
-            "    {} {} · {} · blob {}",
+            "      {} {} · {} · blob {}",
             ui::dim("·"),
             ui::short_id(&c.author),
             ui::dim(&dt),
-            &c.blob_id[..12.min(c.blob_id.len())]
+            console::style(&c.blob_id[..12.min(c.blob_id.len())]).cyan()
         );
     }
     Ok(())

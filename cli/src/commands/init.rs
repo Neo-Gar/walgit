@@ -3,31 +3,96 @@
 
 use crate::commands::CommandContext;
 use crate::config::{LocalRepoConfig, save_repo_config};
-use crate::error::Result;
+use crate::error::{Result, WalGitError};
 use crate::{git, ui};
-use std::path::PathBuf;
+use std::path::Path;
 
 pub async fn run(
     name: String,
+    here: bool,
     description: Option<String>,
     private: bool,
     epochs: Option<u32>,
 ) -> Result<()> {
+    ui::banner();
+
     let cwd = std::env::current_dir()?;
-    let walgit_dir = cwd.join(".walgit");
+    let repo_dir = if here {
+        cwd.clone()
+    } else {
+        let target = cwd.join(&name);
+        if target.exists() && std::fs::read_dir(&target)?.next().is_some() {
+            return Err(WalGitError::other(format!(
+                "{} already exists and is not empty. Use `walgit init {} --here` to initialise in place.",
+                target.display(),
+                name
+            )));
+        }
+        std::fs::create_dir_all(&target)?;
+        target
+    };
+    let walgit_dir = repo_dir.join(".walgit");
 
     if walgit_dir.exists() {
         ui::warn(format!(
-            "{} already exists — overwriting Sui binding",
+            ".walgit already exists at {} — its Sui binding will be overwritten",
             walgit_dir.display()
         ));
     }
 
-    if !cwd.join(".git").exists() {
-        git::init(&cwd)?;
-        ui::info("git init");
+    ui::header("location");
+    ui::info(format!(
+        "working directory: {}",
+        ui::highlight(&repo_dir.display().to_string())
+    ));
+
+    // ─── Step 1: ensure git is initialised in the target directory ────────────
+    // .gitignore is committed BEFORE any on-chain registration so that the
+    // soon-to-be-created .walgit/ directory cannot accidentally leak into
+    // a future commit.
+    ui::header("git");
+    if !repo_dir.join(".git").exists() {
+        ui::info(format!("no git repository in {}", repo_dir.display()));
+        let proceed = ui::prompt_yes_no(
+            "initialize a fresh git repository here?",
+            true,
+        )
+        .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
+        if !proceed {
+            return Err(WalGitError::other(
+                "aborted: a git repository is required so that .walgit/ stays out of commits"
+                    .to_string(),
+            ));
+        }
+        git::init(&repo_dir)?;
+        ui::success("git init");
+    } else {
+        ui::info("existing git repository detected");
     }
 
+    // ─── Step 2: stage and commit .gitignore so .walgit/ is locked out ────────
+    let added_walgit_rule = ensure_gitignore(&repo_dir)?;
+    if added_walgit_rule {
+        git::add(&repo_dir, &[".gitignore"])?;
+        if git::has_staged_changes(&repo_dir) {
+            match git::commit(&repo_dir, "chore: ignore .walgit/") {
+                Ok(()) => ui::success("committed .gitignore (.walgit/ ignored)"),
+                Err(e) => {
+                    // Most common cause: missing user.name/user.email. Don't abort
+                    // — fall through with a loud warning so the user can fix and rerun.
+                    ui::warn(format!(
+                        "could not commit .gitignore: {}. Configure git user.name/user.email and commit manually before pushing.",
+                        e
+                    ));
+                }
+            }
+        }
+    } else {
+        ui::info(".gitignore already ignores .walgit/");
+    }
+
+    // ─── Step 3: register on Sui ──────────────────────────────────────────────
+    ui::header("sui");
     let ctx = CommandContext::load().await?;
     let net = ctx.config.active_network()?;
     let epochs = epochs.unwrap_or(net.walrus.epochs);
@@ -35,8 +100,9 @@ pub async fn run(
     let kp = ctx.keypair()?;
 
     let pb = ui::spinner(format!(
-        "Creating repository '{}' on Sui ({} network)…",
-        name, ctx.config.network
+        "creating repository '{}' on Sui ({})…",
+        ui::highlight(&name),
+        ctx.config.network
     ));
 
     let (repo_id, acl_id, gas) = ctx
@@ -58,34 +124,79 @@ pub async fn run(
         forked_from_acl_id: None,
     };
     save_repo_config(&walgit_dir, &cfg)?;
-    write_gitignore(&cwd)?;
 
     ui::success(format!(
-        "Created '{}' ({})",
-        name,
+        "created {} ({})",
+        ui::highlight(&name),
         if private { "private" } else { "public" }
     ));
-    ui::info(format!("Repository ID: {}", ui::short_id(&repo_id)));
-    ui::info(format!("ACL ID:        {}", ui::short_id(&acl_id)));
-    ui::info(format!("Gas:           {}", gas.display()));
-    ui::info(format!(
-        "Push URL:      walgit://{}/{}",
-        ctx.active_address, name
-    ));
+
+    ui::header("summary");
+    println!(
+        "  {} {}",
+        ui::label("repository id "),
+        ui::short_id(&repo_id)
+    );
+    println!(
+        "  {} {}",
+        ui::label("access control"),
+        ui::short_id(&acl_id)
+    );
+    println!("  {} {}", ui::label("network       "), ctx.config.network);
+    println!("  {} {}", ui::label("epochs        "), epochs);
+    println!("  {} {}", ui::label("gas           "), gas.display());
+    println!(
+        "  {} {}",
+        ui::label("push url      "),
+        ui::highlight(&format!("walgit://{}/{}", ctx.active_address, name))
+    );
+    println!();
+    ui::info("next steps:");
+    if !here {
+        println!(
+            "    {} {}",
+            ui::dim("$"),
+            ui::highlight(&format!("cd {}", name))
+        );
+    }
+    println!(
+        "    {} {}",
+        ui::dim("$"),
+        ui::highlight(&format!(
+            "git remote add origin walgit://{}/{}",
+            ctx.active_address, name
+        ))
+    );
+    println!(
+        "    {} {}",
+        ui::dim("$"),
+        ui::highlight("git push -u origin main")
+    );
+    println!();
 
     Ok(())
 }
 
-fn write_gitignore(cwd: &PathBuf) -> Result<()> {
-    let p = cwd.join(".gitignore");
+/// Ensure `.gitignore` contains a `.walgit/` rule. Returns true if a new rule
+/// was appended (caller should stage + commit), false if the rule was already
+/// present.
+fn ensure_gitignore(repo_dir: &Path) -> Result<bool> {
+    let p = repo_dir.join(".gitignore");
     let existing = std::fs::read_to_string(&p).unwrap_or_default();
-    if !existing.contains(".walgit/") {
-        let new = if existing.is_empty() {
-            ".walgit/\n".to_string()
-        } else {
-            format!("{}\n.walgit/\n", existing.trim_end())
-        };
-        std::fs::write(&p, new)?;
+    if existing
+        .lines()
+        .any(|l| l.trim() == ".walgit/" || l.trim() == ".walgit")
+    {
+        return Ok(false);
     }
-    Ok(())
+    let new = if existing.is_empty() {
+        "# WalGit — local metadata cache, never commit this\n.walgit/\n".to_string()
+    } else {
+        format!(
+            "{}\n\n# WalGit — local metadata cache, never commit this\n.walgit/\n",
+            existing.trim_end()
+        )
+    };
+    std::fs::write(&p, new)?;
+    Ok(true)
 }

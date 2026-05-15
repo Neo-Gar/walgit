@@ -58,6 +58,24 @@ impl CommandContext {
     }
 }
 
+/// Validate global configuration without touching the filesystem or network.
+/// Run this before any command that may have side effects (init creates
+/// directories, push uploads to Walrus, etc.) so misconfiguration fails fast
+/// and visibly.
+///
+/// Checks, in order:
+///   1. `~/.walgit/config.toml` parses (or default if missing)
+///   2. active network exists under `[networks.<name>]`
+///   3. `package_id` is set for the active network
+///   4. Sui keystore + `client.yaml` are readable and an active address resolves
+pub fn preflight() -> Result<()> {
+    let config = crate::config::load()?;
+    let _ = config.active_network()?;
+    let _ = config.package_id()?;
+    let _ = keystore::read_active_address(config.wallet_path.as_deref())?;
+    Ok(())
+}
+
 /// Resolve the working directory's `.walgit/` and the loaded repo config.
 pub fn find_repo() -> Result<(PathBuf, PathBuf, LocalRepoConfig)> {
     let cwd = std::env::current_dir()?;

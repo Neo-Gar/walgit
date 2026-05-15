@@ -49,18 +49,24 @@ pub async fn list() -> Result<()> {
     require_registered(&local)?;
     let ctx = CommandContext::load().await?;
     let prs = ctx.sui.list_pull_requests(&ctx.package_id, &local.id).await?;
+    ui::header(&format!("pull requests ({})", prs.len()));
     if prs.is_empty() {
-        ui::info("no pull requests");
+        ui::info("no pull requests yet");
         return Ok(());
     }
-    println!();
     for pr in prs {
+        let status_styled = match pr.status {
+            1 => console::style(pr.status_label()).green().bold(),
+            2 => console::style(pr.status_label()).red(),
+            _ => console::style(pr.status_label()).yellow(),
+        };
         println!(
-            "  #{:<3} {:<8} {} → {}  by {}",
-            pr.number,
-            pr.status_label(),
-            pr.source_branch,
-            pr.target_branch,
+            "  {} {:<8} {} → {}  {} {}",
+            console::style(format!("#{}", pr.number)).cyan().bold(),
+            status_styled,
+            ui::highlight(&pr.source_branch),
+            ui::highlight(&pr.target_branch),
+            ui::dim("by"),
             ui::short_id(&pr.author),
         );
     }
@@ -183,17 +189,24 @@ pub async fn close(pr_id: String) -> Result<()> {
 pub async fn status(pr_id: String) -> Result<()> {
     let ctx = CommandContext::load().await?;
     let pr = ctx.sui.get_pull_request(&pr_id).await?;
-    println!();
-    println!("  PR #{}  ({})", pr.number, pr.status_label());
-    ui::info(format!("source: {}", pr.source_branch));
-    ui::info(format!("target: {}", pr.target_branch));
-    ui::info(format!("author: {}", ui::short_id(&pr.author)));
-    ui::info(format!("approved: {}", pr.approved));
+    ui::header(&format!("PR #{} — {}", pr.number, pr.status_label()));
+    println!("  {} {}", ui::label("source  "), ui::highlight(&pr.source_branch));
+    println!("  {} {}", ui::label("target  "), ui::highlight(&pr.target_branch));
+    println!("  {} {}", ui::label("author  "), ui::short_id(&pr.author));
+    println!(
+        "  {} {}",
+        ui::label("approved"),
+        if pr.approved {
+            console::style("yes").green().bold().to_string()
+        } else {
+            console::style("no").yellow().to_string()
+        }
+    );
     if let Some(a) = &pr.approved_by {
-        ui::info(format!("approved by: {}", ui::short_id(a)));
+        println!("  {} {}", ui::label("by      "), ui::short_id(a));
     }
     if let Some(b) = &pr.merge_commit_blob_id {
-        ui::info(format!("merge blob: {}", b));
+        println!("  {} {}", ui::label("merged  "), b);
     }
     Ok(())
 }

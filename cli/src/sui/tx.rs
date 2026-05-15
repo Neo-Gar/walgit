@@ -10,6 +10,7 @@
 use crate::error::{Result, WalGitError};
 use crate::sui::keystore::KeyPair;
 use crate::sui::types::GasCost;
+use base64::Engine as _;
 use blake2::{Blake2b, digest::consts::U32};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
@@ -17,7 +18,7 @@ use sui_graphql::Client as GqlClient;
 use sui_sdk_types::{
     Address, Digest as SuiDigest, Ed25519PublicKey, Ed25519Signature, GasPayment, Identifier,
     Input, MoveCall, ObjectReference, ProgrammableTransaction, SimpleSignature, Transaction,
-    TransactionExpiration, TransactionKind, UserSignature,
+    TransactionEffects, TransactionExpiration, TransactionKind, UserSignature,
 };
 
 /// Sui Clock object — always shared, initial version 1.
@@ -80,11 +81,31 @@ impl ExecResult {
             .iter()
             .find(|o| o.object_type.contains(type_suffix))
     }
+
+    /// Debug summary of every created object — id + resolved type. Used in
+    /// error messages so the user can tell whether the object actually wasn't
+    /// created or whether the GraphQL indexer just hasn't caught up yet.
+    pub fn created_summary(&self) -> String {
+        if self.created_objects.is_empty() {
+            return "<no created objects>".to_string();
+        }
+        self.created_objects
+            .iter()
+            .map(|o| {
+                if o.object_type.is_empty() {
+                    format!("{} (type pending indexer)", o.object_id)
+                } else {
+                    format!("{} : {}", o.object_id, o.object_type)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// Build, sign, and execute a single Move call as a programmable transaction.
 pub async fn execute_move_call(
-    graphql: &GqlClient,
+    _graphql: &GqlClient,
     graphql_url: &str,
     keypair: &KeyPair,
     package_id: &str,
@@ -125,8 +146,10 @@ pub async fn execute_move_call(
 
     let ptb = ProgrammableTransaction { inputs, commands };
 
-    let (gas_objects, gas_price) =
-        tokio::try_join!(get_gas_coins(graphql_url, &keypair.address, gas_budget), get_reference_gas_price(graphql_url))?;
+    let (gas_objects, gas_price) = tokio::try_join!(
+        get_gas_coins(graphql_url, &keypair.address, gas_budget),
+        get_reference_gas_price(graphql_url),
+    )?;
 
     let tx = Transaction {
         kind: TransactionKind::ProgrammableTransaction(ptb),
@@ -141,17 +164,69 @@ pub async fn execute_move_call(
     };
 
     let signature = sign_transaction(&tx, keypair)?;
+    execute_signed(graphql_url, &tx, &signature).await
+}
 
-    let result = graphql
-        .execute_transaction(&tx, &[signature])
-        .await
-        .map_err(|e| WalGitError::sui_transaction(format!("execute failed: {}", e)))?;
+/// Execute a signed transaction via a raw GraphQL mutation. We do this in raw
+/// form (rather than `sui_graphql::Client::execute_transaction`) so that
+/// `BAD_USER_INPUT` and other server-side errors propagate up with their
+/// actual messages instead of silently coming back as `effects: None`.
+async fn execute_signed(
+    graphql_url: &str,
+    tx: &Transaction,
+    signature: &UserSignature,
+) -> Result<ExecResult> {
+    let tx_bytes = bcs::to_bytes(tx)?;
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+    let sig_b64 = signature.to_base64();
 
-    let effects = result
-        .effects
-        .ok_or_else(|| WalGitError::sui_transaction("no effects returned".to_string()))?;
+    let data = graphql_query(
+        graphql_url,
+        r#"mutation($tx: Base64!, $sigs: [Base64!]!) {
+          executeTransaction(transactionDataBcs: $tx, signatures: $sigs) {
+            effects { effectsBcs }
+          }
+        }"#,
+        json!({ "tx": tx_b64, "sigs": [sig_b64] }),
+    )
+    .await?;
+
+    let effects_b64 = data["executeTransaction"]["effects"]["effectsBcs"]
+        .as_str()
+        .ok_or_else(|| {
+            WalGitError::sui_transaction("executeTransaction returned no effectsBcs".to_string())
+        })?;
+
+    let effects_bytes = base64::engine::general_purpose::STANDARD
+        .decode(effects_b64)
+        .map_err(|e| WalGitError::sui_transaction(format!("decode effects b64: {}", e)))?;
+
+    let effects: TransactionEffects = bcs::from_bytes(&effects_bytes)
+        .map_err(|e| WalGitError::sui_transaction(format!("decode effects bcs: {}", e)))?;
+
+    // Surface on-chain failure (Move abort, gas exhaustion, etc.) as a clear error
+    // rather than as "no created objects".
+    if let Some(failure) = effects_failure(&effects) {
+        return Err(WalGitError::sui_transaction(failure));
+    }
 
     parse_exec_result(effects).await
+}
+
+fn effects_failure(effects: &TransactionEffects) -> Option<String> {
+    use sui_sdk_types::ExecutionStatus;
+    let status = match effects {
+        TransactionEffects::V1(e) => &e.status,
+        TransactionEffects::V2(e) => &e.status,
+    };
+    match status {
+        ExecutionStatus::Success => None,
+        ExecutionStatus::Failure { error, command } => Some(format!(
+            "Move execution failed{}: {:?}",
+            command.map(|c| format!(" at command {}", c)).unwrap_or_default(),
+            error
+        )),
+    }
 }
 
 /// BCS-encode the transaction with the TransactionData intent prefix [0,0,0],
@@ -254,17 +329,21 @@ pub async fn get_gas_coins(
     address: &str,
     min_total: u64,
 ) -> Result<Vec<ObjectReference>> {
+    // Modern Sui GraphQL: `objects` is a root field with combined filter,
+    // not nested under `address`. We filter both by owner and by type so the
+    // result is already SUI coins only.
     let data = graphql_query(
         graphql_url,
         r#"query($owner: SuiAddress!) {
-          address(address: $owner) {
-            coins(type: "0x2::sui::SUI", first: 25) {
-              nodes {
-                address
-                version
-                digest
-                contents { json }
-              }
+          objects(
+            filter: { owner: $owner, type: "0x2::coin::Coin<0x2::sui::SUI>" }
+            first: 25
+          ) {
+            nodes {
+              address
+              version
+              digest
+              asMoveObject { contents { json } }
             }
           }
         }"#,
@@ -273,9 +352,7 @@ pub async fn get_gas_coins(
     .await?;
 
     let empty: Vec<Value> = vec![];
-    let nodes = data["address"]["coins"]["nodes"]
-        .as_array()
-        .unwrap_or(&empty);
+    let nodes = data["objects"]["nodes"].as_array().unwrap_or(&empty);
 
     let mut picked: Vec<ObjectReference> = vec![];
     let mut total: u128 = 0;
@@ -286,10 +363,14 @@ pub async fn get_gas_coins(
             .or_else(|| node["version"].as_str().and_then(|s| s.parse().ok()))
             .unwrap_or(0);
         let digest = node["digest"].as_str().unwrap_or("");
-        let balance: u128 = node["contents"]["json"]["balance"]
+        let balance: u128 = node["asMoveObject"]["contents"]["json"]["balance"]
             .as_str()
             .and_then(|s| s.parse().ok())
-            .or_else(|| node["contents"]["json"]["balance"].as_u64().map(|n| n as u128))
+            .or_else(|| {
+                node["asMoveObject"]["contents"]["json"]["balance"]
+                    .as_u64()
+                    .map(|n| n as u128)
+            })
             .unwrap_or(0);
         if id.is_empty() || digest.is_empty() {
             continue;
@@ -361,6 +442,10 @@ async fn parse_exec_result(effects: sui_sdk_types::TransactionEffects) -> Result
 
 /// Look up the Move type string for each object id. Used to disambiguate
 /// "which created object is the Repository" after a multi-object PTB.
+///
+/// Polls per-object with a short backoff: the Sui GraphQL indexer typically
+/// lags a few hundred ms behind the executor, so the freshly created object
+/// may not be queryable on the very first attempt.
 pub async fn fetch_object_types(
     graphql_url: &str,
     ids: &[String],
@@ -368,18 +453,28 @@ pub async fn fetch_object_types(
     use std::collections::HashMap;
     let mut out = HashMap::new();
     for id in ids {
-        let data = graphql_query(
-            graphql_url,
-            r#"query($id: SuiAddress!) {
-              object(address: $id) {
-                asMoveObject { contents { type { repr } } }
-              }
-            }"#,
-            json!({ "id": id }),
-        )
-        .await?;
-        if let Some(t) = data["object"]["asMoveObject"]["contents"]["type"]["repr"].as_str() {
-            out.insert(id.clone(), t.to_string());
+        let mut delay_ms = 200u64;
+        let mut last_seen: Option<String> = None;
+        for _ in 0..6 {
+            let data = graphql_query(
+                graphql_url,
+                r#"query($id: SuiAddress!) {
+                  object(address: $id) {
+                    asMoveObject { contents { type { repr } } }
+                  }
+                }"#,
+                json!({ "id": id }),
+            )
+            .await?;
+            if let Some(t) = data["object"]["asMoveObject"]["contents"]["type"]["repr"].as_str() {
+                last_seen = Some(t.to_string());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            delay_ms = (delay_ms * 2).min(2_000);
+        }
+        if let Some(t) = last_seen {
+            out.insert(id.clone(), t);
         }
     }
     Ok(out)

@@ -252,24 +252,26 @@ impl Queries {
             let data = self
                 .raw(
                     r#"query($owner: SuiAddress!, $type: String!, $cursor: String) {
-                      address(address: $owner) {
-                        objects(filter: { type: $type }, first: 50, after: $cursor) {
-                          nodes { address contents { json } }
-                          pageInfo { hasNextPage endCursor }
-                        }
+                      objects(
+                        filter: { owner: $owner, type: $type }
+                        first: 50
+                        after: $cursor
+                      ) {
+                        nodes { address asMoveObject { contents { json } } }
+                        pageInfo { hasNextPage endCursor }
                       }
                     }"#,
                     json!({ "owner": owner, "type": repo_type, "cursor": cursor }),
                 )
                 .await?;
 
-            let objects = &data["address"]["objects"];
+            let objects = &data["objects"];
             let Some(nodes) = objects["nodes"].as_array() else {
                 break;
             };
 
             for node in nodes {
-                let fields = &node["contents"]["json"];
+                let fields = &node["asMoveObject"]["contents"]["json"];
                 if fields["name"].as_str() != Some(name) {
                     continue;
                 }

@@ -15,32 +15,42 @@ pub async fn run() -> Result<()> {
         .get_repo_by_id(&local.id, &ctx.active_address)
         .await?;
 
-    println!();
-    println!("  {}", repo.name);
+    ui::header("repository");
+    println!("  {}", ui::highlight(&repo.name));
     if !repo.description.is_empty() {
         println!("  {}", ui::dim(&repo.description));
     }
     println!();
-    ui::info(format!("repository: {}", ui::short_id(&repo.id)));
-    ui::info(format!("owner:      {}", ui::short_id(&repo.owner)));
-    ui::info(format!(
-        "visibility: {}",
-        if repo.is_private { "private" } else { "public" }
-    ));
-    ui::info(format!("network:    {}", ctx.config.network));
-    ui::info(format!("branches:   {}", repo.branches.len()));
-    for (branch, commit_id) in &repo.branches {
-        println!(
-            "    {} {} → {}",
-            ui::dim("·"),
-            branch,
-            ui::short_id(commit_id)
-        );
+    println!("  {} {}", ui::label("id        "), ui::short_id(&repo.id));
+    println!("  {} {}", ui::label("owner     "), ui::short_id(&repo.owner));
+    println!(
+        "  {} {}",
+        ui::label("visibility"),
+        if repo.is_private {
+            ui::highlight("private")
+        } else {
+            "public".to_string()
+        }
+    );
+    println!("  {} {}", ui::label("network   "), ctx.config.network);
+
+    ui::header("branches");
+    if repo.branches.is_empty() {
+        ui::info("no branches yet — run `git push walgit://…`");
+    } else {
+        for (branch, commit_id) in &repo.branches {
+            println!(
+                "  {} {:<20} → {}",
+                ui::dim("·"),
+                ui::highlight(branch),
+                ui::short_id(commit_id)
+            );
+        }
     }
 
     if !local.pushes.is_empty() {
-        println!();
-        ui::info(format!("local pushes: {}", local.pushes.len()));
+        ui::header("local cache");
+        ui::info(format!("recorded pushes: {}", local.pushes.len()));
     }
 
     Ok(())

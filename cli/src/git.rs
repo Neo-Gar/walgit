@@ -169,6 +169,45 @@ pub fn init(path: &Path) -> Result<()> {
     ensure_ok(&out, "git init")
 }
 
+pub fn add(repo_path: &Path, paths: &[&str]) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("add").args(paths).current_dir(repo_path);
+    let out = run(&mut cmd, "git add")?;
+    ensure_ok(&out, "git add")
+}
+
+/// Returns true if the repository has at least one staged change ready to commit.
+pub fn has_staged_changes(repo_path: &Path) -> bool {
+    Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(repo_path)
+        .status()
+        .map(|s| !s.success()) // exit code 1 = changes present
+        .unwrap_or(false)
+}
+
+pub fn commit(repo_path: &Path, message: &str) -> Result<()> {
+    let out = run(
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_path),
+        "git commit",
+    )?;
+    ensure_ok(&out, "git commit")
+}
+
+/// True if `git rev-parse HEAD` resolves — i.e. there is at least one commit.
+pub fn has_any_commits(repo_path: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn checkout(repo_path: &Path, commit_hash: &str) -> Result<()> {
     let head_path = repo_path.join(".git").join("HEAD");
     std::fs::write(&head_path, format!("{}\n", commit_hash))?;

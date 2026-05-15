@@ -63,15 +63,20 @@ pub async fn run(
     } else {
         ui::success("config updated");
         let net = cfg.active_network()?;
-        ui::info(format!("active network: {}", cfg.network));
-        ui::info(format!(
-            "package_id:      {}",
-            net.package_id.as_deref().unwrap_or("(unset)")
-        ));
-        ui::info(format!("sui graphql:     {}", net.sui.graphql_url));
-        ui::info(format!("walrus pub:      {}", net.walrus.publisher_url));
-        ui::info(format!("walrus agg:      {}", net.walrus.aggregator_url));
-        ui::info(format!("epochs default:  {}", net.walrus.epochs));
+        ui::header("active network");
+        println!("  {} {}", ui::label("network    "), ui::highlight(&cfg.network));
+        println!(
+            "  {} {}",
+            ui::label("package_id "),
+            net.package_id
+                .as_deref()
+                .map(ui::highlight)
+                .unwrap_or_else(|| ui::dim("(unset)"))
+        );
+        println!("  {} {}", ui::label("sui graphql"), net.sui.graphql_url);
+        println!("  {} {}", ui::label("walrus pub "), net.walrus.publisher_url);
+        println!("  {} {}", ui::label("walrus agg "), net.walrus.aggregator_url);
+        println!("  {} {}", ui::label("epochs     "), net.walrus.epochs);
     }
     Ok(())
 }

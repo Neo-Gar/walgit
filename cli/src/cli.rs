@@ -133,6 +133,13 @@ pub enum PrAction {
         mine: bool,
     },
     Show { pr_id: String },
+    /// Show the diff between target branch and the PR's source tip.
+    Diff {
+        pr_id: String,
+        /// Show only the per-file stat summary, no patch bodies.
+        #[arg(long)]
+        stat: bool,
+    },
     Approve { pr_id: String },
     Merge { pr_id: String },
     Close { pr_id: String },

@@ -363,6 +363,77 @@ pub async fn show(pr_id: String) -> Result<()> {
     Ok(())
 }
 
+// ─── diff ─────────────────────────────────────────────────────────────────────
+
+pub async fn diff(pr_id: String, stat_only: bool) -> Result<()> {
+    let ctx = CommandContext::load().await?;
+    let pr = ctx.sui.get_pull_request(&pr_id).await?;
+    let target = resolve_pr_target(&ctx, &pr_id).await?;
+
+    if pr.source_git_head.is_empty() {
+        return Err(WalGitError::other(
+            "PR predates the source_git_head field (created on an older contract version). \
+             Recreate the PR with the current walgit to enable diff.".to_string(),
+        ));
+    }
+
+    ui::header(&format!("PR #{} diff preview", pr.number));
+    println!(
+        "  {} {}#{} → {}/{}#{}",
+        ui::label("flow    "),
+        ui::short_id(&pr.author),
+        pr.source_branch,
+        target.owner,
+        target.name,
+        pr.target_branch,
+    );
+
+    // Ensure a local working tree of the target — needed to run `git diff`.
+    let (repo_dir, _epochs) = resolve_target_workdir(&ctx, &target).await?;
+
+    // Fetch the PR pack from Walrus and unpack into the working tree.
+    ui::info("downloading PR blob from Walrus…");
+    let raw = ctx.walrus.download(&pr.source_blob_id).await?;
+    let pack = if target.is_private {
+        let seal = ctx.seal_client()?;
+        let v = ctx.sui.get_initial_shared_version(&target.acl_id).await?;
+        seal.decrypt(
+            &ctx.package_id,
+            &target.repo_id,
+            &target.acl_id,
+            v,
+            &ctx.active_address,
+            ctx.config.wallet_path.as_deref(),
+            &raw,
+        )
+        .await?
+    } else {
+        raw
+    };
+    git::unpack_objects(&repo_dir, &pack)?;
+
+    // Resolve the diff base: latest target-branch tip git_head on chain (or
+    // fall back to the local branch name — git itself will resolve it).
+    let base = match ctx
+        .sui
+        .get_repo_branch_head(&target.repo_id, &pr.target_branch)
+        .await
+    {
+        Ok(Some(commit_id)) => match ctx.sui.get_object(&commit_id).await {
+            Ok(o) => o["git_head"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| pr.target_branch.clone()),
+            Err(_) => pr.target_branch.clone(),
+        },
+        _ => pr.target_branch.clone(),
+    };
+
+    ui::header("diff");
+    git::stream_diff(&repo_dir, &base, &pr.source_git_head, stat_only)?;
+    Ok(())
+}
+
 // ─── approve / merge / close ──────────────────────────────────────────────────
 
 pub async fn approve(pr_id: String) -> Result<()> {

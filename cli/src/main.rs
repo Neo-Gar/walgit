@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
             } => walgit::commands::pr::create(source_branch, target_branch, yes).await?,
             PrAction::List { mine } => walgit::commands::pr::list(mine).await?,
             PrAction::Show { pr_id } => walgit::commands::pr::show(pr_id).await?,
+            PrAction::Diff { pr_id, stat } => walgit::commands::pr::diff(pr_id, stat).await?,
             PrAction::Approve { pr_id } => walgit::commands::pr::approve(pr_id).await?,
             PrAction::Merge { pr_id } => walgit::commands::pr::merge(pr_id).await?,
             PrAction::Close { pr_id } => walgit::commands::pr::close(pr_id).await?,

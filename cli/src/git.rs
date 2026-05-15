@@ -310,6 +310,40 @@ pub fn get_remote_url(repo_path: &Path, name: &str) -> Result<Option<String>> {
     }
 }
 
+/// Stream `git diff base..head` (and optional `--stat`) directly to the
+/// process's stdout/stderr — git's own pager kicks in automatically when
+/// stdout is a TTY.
+pub fn stream_diff(repo_path: &Path, base: &str, head: &str, stat_only: bool) -> Result<()> {
+    let range = format!("{}..{}", base, head);
+
+    // Summary stat first, always — it's cheap and gives the user a quick map.
+    let summary_status = Command::new("git")
+        .args(["diff", "--stat", "--color=always", &range])
+        .current_dir(repo_path)
+        .status()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("git diff --stat failed to start: {}", e)),
+        })?;
+    if !summary_status.success() {
+        return Err(WalGitError::git("git diff --stat exited non-zero"));
+    }
+
+    if stat_only {
+        return Ok(());
+    }
+
+    let body_status = Command::new("git")
+        .args(["diff", "--color=always", &range])
+        .current_dir(repo_path)
+        .status()
+        .map_err(|e| WalGitError::git(format!("git diff failed to start: {}", e)))?;
+    if !body_status.success() {
+        return Err(WalGitError::git("git diff exited non-zero"));
+    }
+    Ok(())
+}
+
 /// Idempotently set a git remote: adds it if missing, otherwise updates the URL.
 pub fn set_remote(repo_path: &Path, name: &str, url: &str) -> Result<()> {
     if get_remote_url(repo_path, name)?.is_some() {

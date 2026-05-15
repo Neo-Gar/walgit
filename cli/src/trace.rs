@@ -61,6 +61,16 @@ pub struct ToolCall {
 impl Trace {
     /// Parse the trace JSON and validate it conforms to schema v0.
     pub fn parse(json: &str) -> Result<Self> {
+        // Enforce hard cap on the raw JSON bytes BEFORE deserialisation. Without
+        // this an attacker could craft a 100 MB trace JSON and we'd happily
+        // serde-parse it into memory, even though we'd later refuse to write it.
+        if json.len() > TRACE_HARD_CAP_BYTES {
+            return Err(WalGitError::other(format!(
+                "trace too large ({} bytes > {} hard cap)",
+                json.len(),
+                TRACE_HARD_CAP_BYTES
+            )));
+        }
         let trace: Trace = serde_json::from_str(json)
             .map_err(|e| WalGitError::other(format!("trace JSON parse: {}", e)))?;
         trace.validate()?;

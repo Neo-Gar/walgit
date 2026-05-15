@@ -208,5 +208,9 @@ fn parse_walgit_uri(uri: &str) -> Result<(String, String)> {
             uri
         )));
     }
+    // Strict validation: parts[1] later becomes a path segment in
+    // `cwd.join(&name)` and a git ref. Reject traversal + flag-like inputs.
+    crate::validate::sui_address(parts[0])?;
+    crate::validate::repo_name(parts[1])?;
     Ok((parts[0].to_string(), parts[1].to_string()))
 }

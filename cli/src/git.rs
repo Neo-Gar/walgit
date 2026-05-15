@@ -194,9 +194,11 @@ pub fn unpack_objects(repo_path: &Path, pack_data: &[u8]) -> Result<()> {
 }
 
 pub fn rev_parse(repo_path: &Path, refname: &str) -> Result<String> {
+    // `--end-of-options` stops git from interpreting `refname` as a flag if
+    // it starts with `-`. Belt-and-suspenders alongside upstream validators.
     let out = run(
         Command::new("git")
-            .args(["rev-parse", refname])
+            .args(["rev-parse", "--end-of-options", refname])
             .current_dir(repo_path),
         "git rev-parse",
     )?;
@@ -211,7 +213,7 @@ pub fn get_head_commit(repo_path: &Path) -> Result<String> {
 pub fn get_commit_message(repo_path: &Path, commit_hash: &str) -> Result<String> {
     let out = run(
         Command::new("git")
-            .args(["log", "-1", "--format=%s", commit_hash])
+            .args(["log", "-1", "--format=%s", "--end-of-options", commit_hash])
             .current_dir(repo_path),
         "git log",
     )?;
@@ -308,7 +310,7 @@ pub fn commit_with_long_message(repo_path: &Path, message: &str) -> Result<()> {
 pub fn read_commit_message(repo_path: &Path, commit_hash: &str) -> Result<String> {
     let out = run(
         Command::new("git")
-            .args(["log", "-1", "--format=%B", commit_hash])
+            .args(["log", "-1", "--format=%B", "--end-of-options", commit_hash])
             .current_dir(repo_path),
         "git log -1 --format=%B",
     )?;
@@ -386,7 +388,7 @@ pub fn stream_diff(repo_path: &Path, base: &str, head: &str, stat_only: bool) ->
 
     // Summary stat first, always — it's cheap and gives the user a quick map.
     let summary_status = Command::new("git")
-        .args(["diff", "--stat", "--color=always", &range])
+        .args(["diff", "--stat", "--color=always", "--end-of-options", &range])
         .current_dir(repo_path)
         .status()
         .map_err(|e| match e.kind() {
@@ -402,7 +404,7 @@ pub fn stream_diff(repo_path: &Path, base: &str, head: &str, stat_only: bool) ->
     }
 
     let body_status = Command::new("git")
-        .args(["diff", "--color=always", &range])
+        .args(["diff", "--color=always", "--end-of-options", &range])
         .current_dir(repo_path)
         .status()
         .map_err(|e| WalGitError::git(format!("git diff failed to start: {}", e)))?;

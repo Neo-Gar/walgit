@@ -119,6 +119,9 @@ pub async fn clean(repo_id: Option<String>, all: bool) -> Result<()> {
             "specify <repo_id> or pass --all".to_string(),
         ));
     };
+    // Validate before `Path::join` — otherwise `cache clean ..` would resolve
+    // to `~/.walgit/work/..` → wiping the entire cache root parent.
+    crate::validate::sui_object_id(&id)?;
     let slug = id.trim_start_matches("0x");
     let dir = root.join(slug);
     if !dir.exists() {

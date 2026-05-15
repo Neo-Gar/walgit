@@ -515,6 +515,8 @@ fn parse_uri(uri: &str) -> Result<(String, String)> {
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
         bail!("invalid URI '{}' — expected walgit://<owner>/<repo>", uri);
     }
+    walgit::validate::sui_address(parts[0]).map_err(|e| anyhow!("{}", e))?;
+    walgit::validate::repo_name(parts[1]).map_err(|e| anyhow!("{}", e))?;
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 

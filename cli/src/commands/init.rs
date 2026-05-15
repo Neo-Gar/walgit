@@ -13,6 +13,10 @@ pub async fn run(
     private: bool,
     epochs: Option<u32>,
 ) -> Result<()> {
+    // Validate before any side effects — repo name flows into filesystem
+    // paths (`cwd.join(&name)`) and URLs, so `../etc` or `--help` must die here.
+    crate::validate::repo_name(&name)?;
+
     ui::banner();
 
     let cwd = std::env::current_dir()?;

@@ -14,6 +14,7 @@ pub mod seal;
 pub mod sui;
 pub mod trace;
 pub mod ui;
+pub mod validate;
 pub mod walrus;
 
 pub use config::{Config, LocalRepoConfig, PushRecord};

@@ -24,6 +24,17 @@ pub struct Config {
     /// Map of network presets keyed by network name.
     #[serde(default)]
     pub networks: HashMap<String, NetworkConfig>,
+    /// Output display preferences.
+    #[serde(default)]
+    pub display: DisplayConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct DisplayConfig {
+    /// When true, Sui object IDs are rendered as `0xabcde…12345` instead of
+    /// the full 64-hex-char address. Default `false` — full IDs everywhere.
+    #[serde(default)]
+    pub short_ids: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -78,6 +89,7 @@ impl Default for Config {
             network: "testnet".to_string(),
             wallet_path: None,
             networks,
+            display: DisplayConfig::default(),
         }
     }
 }

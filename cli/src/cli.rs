@@ -23,8 +23,6 @@ pub enum Command {
         #[arg(long)]
         here: bool,
         #[arg(long)]
-        description: Option<String>,
-        #[arg(long)]
         private: bool,
         #[arg(long)]
         epochs: Option<u32>,
@@ -49,14 +47,21 @@ pub enum Command {
     Fork {
         /// walgit://<owner>/<repo>
         url: String,
-        #[arg(long)]
-        description: Option<String>,
+        /// Skip the interactive preview/confirmation step.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Pull request operations.
     Pr {
         #[command(subcommand)]
         action: PrAction,
+    },
+
+    /// Manage the auto-clone cache at ~/.walgit/work/.
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
     },
 
     /// Read or modify walgit configuration.
@@ -75,6 +80,12 @@ pub enum Command {
         aggregator_url: Option<String>,
         #[arg(long)]
         epochs: Option<u32>,
+        /// Render Sui object IDs as `0xabcde…12345` everywhere.
+        #[arg(long)]
+        short_ids: bool,
+        /// Render full Sui object IDs everywhere (default).
+        #[arg(long, conflicts_with = "short_ids")]
+        full_ids: bool,
         #[arg(long)]
         show: bool,
     },
@@ -91,15 +102,38 @@ pub enum AccessAction {
 }
 
 #[derive(Subcommand)]
-pub enum PrAction {
-    Create {
-        source_branch: String,
-        #[arg(long, default_value = "main")]
-        target_branch: String,
-    },
+pub enum CacheAction {
+    /// List every cached clone with its size on disk.
     List,
+    /// Delete one or all cached clones.
+    Clean {
+        /// Repository ID (0x…) of the clone to remove. Mutually exclusive with `--all`.
+        repo_id: Option<String>,
+        #[arg(long, conflicts_with = "repo_id")]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PrAction {
+    /// Open a new pull request. With no args, runs interactively:
+    /// auto-detects source branch (HEAD) and target (fork parent if any).
+    Create {
+        #[arg(long)]
+        source_branch: Option<String>,
+        #[arg(long)]
+        target_branch: Option<String>,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// List PRs. Defaults to current repo; `--mine` lists PRs you authored
+    /// across all repositories on the active network.
+    List {
+        #[arg(long)]
+        mine: bool,
+    },
+    Show { pr_id: String },
     Approve { pr_id: String },
     Merge { pr_id: String },
     Close { pr_id: String },
-    Status { pr_id: String },
 }

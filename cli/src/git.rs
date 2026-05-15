@@ -28,6 +28,89 @@ fn ensure_ok(out: &Output, label: &str) -> Result<()> {
     }
 }
 
+/// Pack only the objects reachable from `tip` but NOT reachable from any of
+/// `exclude_tips`. Used for PR packfiles: the maintainer already has the
+/// upstream history, so the fork only uploads the delta.
+///
+/// Returns `Ok((pack_bytes, included_commit_count))`. If no new commits exist
+/// (e.g., source is already at or behind upstream), returns an empty pack and
+/// count = 0 so the caller can short-circuit.
+pub fn pack_objects_incremental(
+    repo_path: &Path,
+    tip: &str,
+    exclude_tips: &[String],
+) -> Result<(Vec<u8>, usize)> {
+    let mut args: Vec<String> = vec!["rev-list".into(), "--objects".into(), tip.to_string()];
+    for ex in exclude_tips {
+        if ex.is_empty() {
+            continue;
+        }
+        args.push(format!("^{}", ex));
+    }
+    let rev_list = run(
+        Command::new("git")
+            .args(args.iter().map(String::as_str))
+            .current_dir(repo_path),
+        "git rev-list",
+    )?;
+    ensure_ok(&rev_list, "git rev-list")?;
+
+    let stdout = String::from_utf8_lossy(&rev_list.stdout);
+    let objects: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+
+    if objects.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    let commit_count = count_new_commits(repo_path, tip, exclude_tips)?;
+
+    let mut child = Command::new("git")
+        .args(["pack-objects", "--stdout"])
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("failed to spawn git pack-objects: {}", e)),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        for obj in &objects {
+            writeln!(stdin, "{}", obj)?;
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| WalGitError::git(format!("git pack-objects wait failed: {}", e)))?;
+    ensure_ok(&out, "git pack-objects")?;
+    Ok((out.stdout, commit_count))
+}
+
+fn count_new_commits(repo_path: &Path, tip: &str, exclude: &[String]) -> Result<usize> {
+    let mut args: Vec<String> = vec!["rev-list".into(), "--count".into(), tip.to_string()];
+    for ex in exclude {
+        if ex.is_empty() {
+            continue;
+        }
+        args.push(format!("^{}", ex));
+    }
+    let out = run(
+        Command::new("git")
+            .args(args.iter().map(String::as_str))
+            .current_dir(repo_path),
+        "git rev-list --count",
+    )?;
+    ensure_ok(&out, "git rev-list --count")?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0))
+}
+
 /// Pack all reachable git objects in the repo into a single packfile.
 pub fn pack_objects(repo_path: &Path) -> Result<Vec<u8>> {
     let rev_list = run(

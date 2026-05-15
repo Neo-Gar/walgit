@@ -17,9 +17,6 @@ pub async fn run() -> Result<()> {
 
     ui::header("repository");
     println!("  {}", ui::highlight(&repo.name));
-    if !repo.description.is_empty() {
-        println!("  {}", ui::dim(&repo.description));
-    }
     println!();
     println!("  {} {}", ui::label("id        "), &repo.id);
     println!("  {} {}", ui::label("owner     "), &repo.owner);

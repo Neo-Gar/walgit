@@ -29,7 +29,6 @@ fun setup_public(scenario: &mut Scenario) {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"test-repo"),
-            string::utf8(b""),
             false,
             &clock,
             ts::ctx(scenario),
@@ -50,7 +49,6 @@ fun setup_private(scenario: &mut Scenario) {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"private-repo"),
-            string::utf8(b""),
             true,
             &clock,
             ts::ctx(scenario),

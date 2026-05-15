@@ -105,6 +105,16 @@ impl SuiClient {
         self.queries.list_pull_requests(package_id, repo_id).await
     }
 
+    pub async fn list_pull_requests_by_author(
+        &self,
+        package_id: &str,
+        author: &str,
+    ) -> Result<Vec<PullRequestRecord>> {
+        self.queries
+            .list_pull_requests_by_author(package_id, author)
+            .await
+    }
+
     pub async fn get_pull_request(&self, pr_id: &str) -> Result<PullRequestRecord> {
         self.queries.get_pull_request(pr_id).await
     }
@@ -142,14 +152,12 @@ impl SuiClient {
         package_id: &str,
         registry_id: &str,
         name: &str,
-        description: &str,
         is_private: bool,
     ) -> Result<(String, String, GasCost)> {
         let registry_v = self.queries.get_initial_shared_version(registry_id).await?;
         let args = vec![
             Arg::shared(registry_id, registry_v, true),
             Arg::pure(&name.to_string())?,
-            Arg::pure(&description.to_string())?,
             Arg::pure(&is_private)?,
             Arg::clock(),
         ];
@@ -214,7 +222,6 @@ impl SuiClient {
         registry_id: &str,
         original_repo_id: &str,
         name: &str,
-        description: &str,
     ) -> Result<(String, String, GasCost)> {
         let (registry_v, repo_v) = tokio::try_join!(
             self.queries.get_initial_shared_version(registry_id),
@@ -224,7 +231,6 @@ impl SuiClient {
             Arg::shared(registry_id, registry_v, true),
             Arg::shared(original_repo_id, repo_v, true),
             Arg::pure(&name.to_string())?,
-            Arg::pure(&description.to_string())?,
             Arg::clock(),
         ];
         let result = self.exec(kp, package_id, "walgit", "fork_repository", args).await?;

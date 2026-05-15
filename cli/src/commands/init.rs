@@ -10,7 +10,6 @@ use std::path::Path;
 pub async fn run(
     name: String,
     here: bool,
-    description: Option<String>,
     private: bool,
     epochs: Option<u32>,
 ) -> Result<()> {
@@ -119,7 +118,6 @@ pub async fn run(
     ui::header("sui");
     let net = ctx.config.active_network()?;
     let epochs = epochs.unwrap_or(net.walrus.epochs);
-    let description = description.unwrap_or_default();
     let kp = ctx.keypair()?;
 
     let pb = ui::spinner(format!(
@@ -130,14 +128,7 @@ pub async fn run(
 
     let (repo_id, acl_id, gas) = ctx
         .sui
-        .create_repository(
-            &kp,
-            &ctx.package_id,
-            &ctx.registry_id,
-            &name,
-            &description,
-            private,
-        )
+        .create_repository(&kp, &ctx.package_id, &ctx.registry_id, &name, private)
         .await?;
 
     pb.finish_and_clear();

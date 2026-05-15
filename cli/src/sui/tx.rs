@@ -290,13 +290,34 @@ async fn graphql_query(url: &str, query: &str, variables: Value) -> Result<Value
         if !errs.is_empty() {
             let msg = errs
                 .iter()
-                .filter_map(|e| e["message"].as_str())
+                .map(format_graphql_error)
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(WalGitError::sui_graphql(msg));
         }
     }
     Ok(v["data"].clone())
+}
+
+/// Format a GraphQL error including its `extensions` (code, details) so the
+/// real on-chain abort reason is visible instead of just a generic
+/// "Failed to execute transaction".
+fn format_graphql_error(e: &Value) -> String {
+    let base = e["message"].as_str().unwrap_or("unknown");
+    let mut parts = vec![base.to_string()];
+
+    let ext = &e["extensions"];
+    if let Some(code) = ext["code"].as_str() {
+        parts.push(format!("code={}", code));
+    }
+    // Sui GraphQL puts the actual execution failure under various keys
+    // depending on version; surface anything that looks informative.
+    for key in ["details", "executionError", "reason", "error"] {
+        if let Some(s) = ext[key].as_str() {
+            parts.push(format!("{}={}", key, s));
+        }
+    }
+    parts.join(" · ")
 }
 
 pub async fn get_reference_gas_price(graphql_url: &str) -> Result<u64> {

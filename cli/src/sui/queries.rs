@@ -233,7 +233,6 @@ impl Queries {
             acl_id,
             owner: fields["owner"].as_str().unwrap_or(fallback_owner).to_string(),
             name,
-            description: fields["description"].as_str().unwrap_or("").to_string(),
             is_private: fields["is_private"].as_bool().unwrap_or(false),
             branches,
         })
@@ -533,6 +532,69 @@ impl Queries {
             records.push(rec);
         }
         records.sort_by_key(|r| r.number);
+        Ok(records)
+    }
+
+    /// List PRs authored by `address` across all repositories on the package.
+    /// Uses an event filter by sender so we don't have to scan the whole index.
+    pub async fn list_pull_requests_by_author(
+        &self,
+        package_id: &str,
+        author: &str,
+    ) -> Result<Vec<PullRequestRecord>> {
+        let event_type = format!("{}::pull_request::PRCreated", package_id);
+        let mut cursor: Option<String> = None;
+        let mut pr_ids: Vec<String> = Vec::new();
+
+        loop {
+            let data = self
+                .raw(
+                    r#"query($type: String!, $sender: SuiAddress!, $cursor: String) {
+                      events(
+                        filter: { type: $type, sender: $sender }
+                        first: 50
+                        after: $cursor
+                      ) {
+                        nodes { contents { json } }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    }"#,
+                    json!({ "type": event_type, "sender": author, "cursor": cursor }),
+                )
+                .await?;
+
+            let empty = vec![];
+            let nodes = data["events"]["nodes"].as_array().unwrap_or(&empty);
+            for node in nodes {
+                let f = &node["contents"]["json"];
+                let pr_id = f["pr_id"]
+                    .as_str()
+                    .or_else(|| f["pr_id"]["bytes"].as_str())
+                    .unwrap_or("");
+                if !pr_id.is_empty() {
+                    pr_ids.push(pr_id.to_string());
+                }
+            }
+
+            if data["events"]["pageInfo"]["hasNextPage"]
+                .as_bool()
+                .unwrap_or(false)
+            {
+                cursor = data["events"]["pageInfo"]["endCursor"]
+                    .as_str()
+                    .map(String::from);
+            } else {
+                break;
+            }
+        }
+
+        let mut records = Vec::with_capacity(pr_ids.len());
+        for id in pr_ids {
+            if let Ok(pr) = self.get_pull_request(&id).await {
+                records.push(pr);
+            }
+        }
+        records.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         Ok(records)
     }
 

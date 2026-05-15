@@ -32,7 +32,6 @@ public struct RepositoryCreated has copy, drop {
     acl_id: ID,
     owner: address,
     name: String,
-    description: String,
     is_private: bool,
     created_at: u64,
 }
@@ -123,7 +122,6 @@ public struct Repository has key {
     id: UID,
     owner: address,
     name: String,
-    description: String,
     is_private: bool,
     /// branch name → Commit object ID
     branches: Table<String, ID>,
@@ -215,7 +213,6 @@ entry fun seal_approve(id: vector<u8>, acl: &AccessControl, ctx: &TxContext) {
 public fun create_repository(
     registry: &mut Registry,
     name: String,
-    description: String,
     is_private: bool,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -243,7 +240,6 @@ public fun create_repository(
         id: repo_uid,
         owner: sender,
         name,
-        description,
         is_private,
         branches: table::new(ctx),
         created_at: now,
@@ -257,7 +253,6 @@ public fun create_repository(
         acl_id,
         owner: sender,
         name: repo.name,
-        description: repo.description,
         is_private: repo.is_private,
         created_at: now,
     });
@@ -339,7 +334,6 @@ public fun fork_repository(
     registry: &mut Registry,
     original_repo: &mut Repository,
     name: String,
-    description: String,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -372,7 +366,6 @@ public fun fork_repository(
         id: repo_uid,
         owner: sender,
         name,
-        description,
         is_private: false,
         branches: table::new(ctx),
         created_at: now,
@@ -414,7 +407,6 @@ public fun delete_repository(
         id,
         owner: _,
         name,
-        description: _,
         is_private: _,
         branches,
         created_at: _,

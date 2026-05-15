@@ -6,7 +6,22 @@
 use console::{Term, style};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{BufRead, Write};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Global flag, set once at program start from `Config.display.short_ids`.
+/// When `false` (default), `short_id` returns the full address.
+static SHORT_IDS: OnceLock<bool> = OnceLock::new();
+
+/// Configure ID rendering. Called from `main.rs` after config is loaded.
+/// Subsequent calls are no-ops (OnceLock).
+pub fn set_short_ids(enabled: bool) {
+    let _ = SHORT_IDS.set(enabled);
+}
+
+fn short_ids_enabled() -> bool {
+    *SHORT_IDS.get().unwrap_or(&false)
+}
 
 /// Tagline shown under the banner.
 const TAGLINE: &str = "decentralized git on walrus + sui";
@@ -147,10 +162,17 @@ pub fn fmt_bytes(n: usize) -> String {
     }
 }
 
+/// Render a Sui object ID for display. Honours the global short-id setting.
+/// In short mode the format is `0xabcde…12345` (5 chars after 0x + last 5).
 pub fn short_id(id: &str) -> String {
+    if !short_ids_enabled() {
+        return id.to_string();
+    }
     let s = id.trim_start_matches("0x");
-    let take = 10.min(s.len());
-    format!("0x{}…", &s[..take])
+    if s.len() < 12 {
+        return id.to_string();
+    }
+    format!("0x{}…{}", &s[..5], &s[s.len() - 5..])
 }
 
 pub fn short_hash(h: &str) -> String {

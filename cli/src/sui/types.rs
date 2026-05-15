@@ -60,7 +60,6 @@ pub struct RepoRecord {
     pub acl_id: String,
     pub owner: String,
     pub name: String,
-    pub description: String,
     pub is_private: bool,
     pub branches: HashMap<String, String>,
 }

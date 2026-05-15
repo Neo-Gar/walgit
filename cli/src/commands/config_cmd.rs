@@ -14,9 +14,14 @@ pub async fn run(
     publisher_url: Option<String>,
     aggregator_url: Option<String>,
     epochs: Option<u32>,
+    short_ids: Option<bool>,
     show: bool,
 ) -> Result<()> {
     let mut cfg = load()?;
+
+    if let Some(v) = short_ids {
+        cfg.display.short_ids = v;
+    }
 
     if let Some(net) = network {
         if !cfg.networks.contains_key(&net) {
@@ -90,6 +95,16 @@ pub async fn run(
         println!("  {} {}", ui::label("walrus pub "), net.walrus.publisher_url);
         println!("  {} {}", ui::label("walrus agg "), net.walrus.aggregator_url);
         println!("  {} {}", ui::label("epochs     "), net.walrus.epochs);
+        ui::header("display");
+        println!(
+            "  {} {}",
+            ui::label("short_ids  "),
+            if cfg.display.short_ids {
+                ui::highlight("on")
+            } else {
+                ui::dim("off (full IDs)")
+            }
+        );
     }
     Ok(())
 }

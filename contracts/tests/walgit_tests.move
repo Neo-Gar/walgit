@@ -27,7 +27,6 @@ fun setup(scenario: &mut Scenario) {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"my-repo"),
-            string::utf8(b"A test repository"),
             false,
             &clock,
             ts::ctx(scenario),
@@ -48,7 +47,6 @@ fun setup_private(scenario: &mut Scenario) {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"private-repo"),
-            string::utf8(b""),
             true,
             &clock,
             ts::ctx(scenario),
@@ -68,7 +66,6 @@ fun do_fork(scenario: &mut Scenario, forker: address) {
             &mut registry,
             &mut repo,
             string::utf8(b"my-repo-fork"),
-            string::utf8(b"a fork"),
             &clock,
             ts::ctx(scenario),
         );
@@ -295,7 +292,6 @@ fun test_fork_private_repo_fails() {
             &mut registry,
             &mut repo,
             string::utf8(b"fork"),
-            string::utf8(b""),
             &clock,
             ts::ctx(&mut scenario),
         );
@@ -323,7 +319,6 @@ fun test_duplicate_name_same_owner_fails() {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"my-repo"),
-            string::utf8(b""),
             false,
             &clock,
             ts::ctx(&mut scenario),
@@ -348,7 +343,6 @@ fun test_same_name_different_owners_ok() {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"my-repo"),
-            string::utf8(b""),
             false,
             &clock,
             ts::ctx(&mut scenario),
@@ -373,7 +367,6 @@ fun test_fork_with_taken_name_fails() {
         walgit::create_repository(
             &mut registry,
             string::utf8(b"my-repo-fork"),
-            string::utf8(b""),
             false,
             &clock,
             ts::ctx(&mut scenario),
@@ -395,7 +388,6 @@ fun test_fork_with_taken_name_fails() {
             &mut registry,
             &mut owners_repo,
             string::utf8(b"my-repo-fork"),
-            string::utf8(b""),
             &clock,
             ts::ctx(&mut scenario),
         );

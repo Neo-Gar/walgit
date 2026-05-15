@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod access;
+pub mod cache;
 pub mod config_cmd;
 pub mod fork;
 pub mod init;
@@ -81,12 +82,23 @@ pub fn preflight() -> Result<()> {
 }
 
 /// Resolve the working directory's `.walgit/` and the loaded repo config.
+///
+/// Walks upward from CWD looking for a per-repo `.walgit/` directory. The
+/// **global** config dir at `~/.walgit/` is explicitly skipped — without this,
+/// a `walgit` command run from `$HOME` (or anywhere outside a repo) would
+/// mistake the global config for a per-repo one and fail with a confusing
+/// "missing field `name`" TOML error.
 pub fn find_repo() -> Result<(PathBuf, PathBuf, LocalRepoConfig)> {
     let cwd = std::env::current_dir()?;
+    let global_dir = crate::config::config_dir().ok();
     let mut p: &Path = &cwd;
     loop {
         let walgit = p.join(".walgit");
-        if walgit.exists() {
+        let is_global = global_dir
+            .as_ref()
+            .map(|g| paths_match(&walgit, g))
+            .unwrap_or(false);
+        if walgit.exists() && !is_global {
             let cfg = load_repo_config(&walgit)?;
             return Ok((p.to_path_buf(), walgit, cfg));
         }
@@ -94,6 +106,16 @@ pub fn find_repo() -> Result<(PathBuf, PathBuf, LocalRepoConfig)> {
             Some(parent) => p = parent,
             None => return Err(WalGitError::NotARepo),
         }
+    }
+}
+
+fn paths_match(a: &Path, b: &Path) -> bool {
+    // Compare canonical forms when possible so symlinked paths don't fool us.
+    let ca = std::fs::canonicalize(a).ok();
+    let cb = std::fs::canonicalize(b).ok();
+    match (ca, cb) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
     }
 }
 

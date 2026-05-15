@@ -3,7 +3,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use walgit::cli::{AccessAction, CacheAction, Cli, Command, PrAction};
+use walgit::cli::{
+    AccessAction, AgentAction, CacheAction, Cli, Command, PrAction, TraceAction,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,7 +53,20 @@ async fn main() -> Result<()> {
             private,
             epochs,
         } => walgit::commands::init::run(name, here, private, epochs).await?,
-        Command::Log { limit } => walgit::commands::log::run(limit).await?,
+        Command::Log { limit, traces } => walgit::commands::log::run(limit, traces).await?,
+        Command::Show { commit, trace } => walgit::commands::show::run(commit, trace).await?,
+        Command::Agent { action } => match action {
+            AgentAction::Commit {
+                paths,
+                message,
+                trace,
+            } => walgit::commands::agent::commit(paths, message, trace).await?,
+        },
+        Command::Trace { action } => match action {
+            TraceAction::Diff { sha_a, sha_b } => {
+                walgit::commands::trace::diff(sha_a, sha_b).await?
+            }
+        },
         Command::Status => walgit::commands::status::run().await?,
         Command::Access { action } => match action {
             AccessAction::List => walgit::commands::access::list().await?,

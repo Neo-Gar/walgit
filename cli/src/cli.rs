@@ -32,6 +32,30 @@ pub enum Command {
     Log {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Show agent_id + task summary for each commit that carries a trace.
+        #[arg(long)]
+        traces: bool,
+    },
+
+    /// Show a single commit. Pass `--trace` to render the reasoning trace.
+    Show {
+        /// Commit SHA. Defaults to HEAD.
+        #[arg(default_value = "HEAD")]
+        commit: String,
+        #[arg(long)]
+        trace: bool,
+    },
+
+    /// Agent-facing helpers (commit, …).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+
+    /// Operate on reasoning traces.
+    Trace {
+        #[command(subcommand)]
+        action: TraceAction,
     },
 
     /// Show repository status.
@@ -99,6 +123,31 @@ pub enum AccessAction {
     Grant { role: String, address: String },
     /// Revoke access. role = "read" or "write".
     Revoke { role: String, address: String },
+}
+
+#[derive(Subcommand)]
+pub enum AgentAction {
+    /// Stage paths, write a commit, and embed a reasoning trace footer.
+    Commit {
+        /// Files / directories to add (passed to `git add`). Use `.` for all.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Short commit subject (the user-visible message).
+        #[arg(long, short = 'm', required = true)]
+        message: String,
+        /// Path to a JSON trace file. Pass `-` to read trace from stdin.
+        #[arg(long, required = true)]
+        trace: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TraceAction {
+    /// Side-by-side diff of two commits' reasoning traces.
+    Diff {
+        sha_a: String,
+        sha_b: String,
+    },
 }
 
 #[derive(Subcommand)]

@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod access;
+pub mod agent;
 pub mod cache;
 pub mod config_cmd;
 pub mod fork;
 pub mod init;
 pub mod log;
 pub mod pr;
+pub mod show;
 pub mod status;
+pub mod trace;
 
 use crate::config::{Config, LocalRepoConfig, load_repo_config};
 use crate::error::{Result, WalGitError};

@@ -279,6 +279,74 @@ pub fn commit(repo_path: &Path, message: &str) -> Result<()> {
     ensure_ok(&out, "git commit")
 }
 
+/// Same as `commit` but feeds the message via `-F -` (stdin) so it can hold
+/// arbitrary bytes including multi-paragraph JSON footers without the shell
+/// quoting hell of `-m`.
+pub fn commit_with_long_message(repo_path: &Path, message: &str) -> Result<()> {
+    let mut child = Command::new("git")
+        .args(["commit", "-F", "-"])
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("failed to spawn git commit: {}", e)),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(message.as_bytes())?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| WalGitError::git(format!("git commit wait failed: {}", e)))?;
+    ensure_ok(&out, "git commit")
+}
+
+/// Read the full raw commit message for a given SHA. Used by `walgit show`,
+/// `walgit log --traces`, and the trace extractor.
+pub fn read_commit_message(repo_path: &Path, commit_hash: &str) -> Result<String> {
+    let out = run(
+        Command::new("git")
+            .args(["log", "-1", "--format=%B", commit_hash])
+            .current_dir(repo_path),
+        "git log -1 --format=%B",
+    )?;
+    ensure_ok(&out, "git log")?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// One-line iteration of recent commits on a branch. Returns
+/// `[(sha, raw_message)]` in newest-first order.
+pub fn recent_commits(repo_path: &Path, refname: &str, limit: usize) -> Result<Vec<(String, String)>> {
+    // Format: `<sha>\x1F<full message>\x1E` — record separator + group sep.
+    let limit_arg = format!("-{}", limit);
+    let out = run(
+        Command::new("git")
+            .args([
+                "log",
+                &limit_arg,
+                "--format=%H%x1F%B%x1E",
+                refname,
+            ])
+            .current_dir(repo_path),
+        "git log",
+    )?;
+    ensure_ok(&out, "git log")?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut out_vec = Vec::new();
+    for record in s.split('\x1E') {
+        let trimmed = record.trim_start_matches('\n');
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((sha, body)) = trimmed.split_once('\x1F') {
+            out_vec.push((sha.trim().to_string(), body.to_string()));
+        }
+    }
+    Ok(out_vec)
+}
+
 /// True if `git rev-parse HEAD` resolves — i.e. there is at least one commit.
 pub fn has_any_commits(repo_path: &Path) -> bool {
     Command::new("git")

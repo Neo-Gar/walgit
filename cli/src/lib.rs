@@ -12,6 +12,7 @@ pub mod git;
 pub mod retry;
 pub mod seal;
 pub mod sui;
+pub mod trace;
 pub mod ui;
 pub mod walrus;
 

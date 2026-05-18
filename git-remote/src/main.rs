@@ -79,7 +79,10 @@ async fn run() -> Result<()> {
         .package_id()
         .map_err(|e| anyhow!("{}", e))?
         .to_string();
-    let net = config.active_network().map_err(|e| anyhow!("{}", e))?.clone();
+    let net = config
+        .active_network()
+        .map_err(|e| anyhow!("{}", e))?
+        .clone();
     let sui = walgit::SuiClient::new(net.sui.graphql_url.clone())?;
     let walrus = walgit::WalrusClient::new(
         net.walrus.publisher_url.clone(),
@@ -172,8 +175,7 @@ async fn run() -> Result<()> {
                 let repo = sui_repo.as_ref().unwrap();
 
                 if repo.is_private && !repo.acl_id.is_empty() {
-                    let active =
-                        keystore::read_active_address(config.wallet_path.as_deref()).ok();
+                    let active = keystore::read_active_address(config.wallet_path.as_deref()).ok();
                     if let Some(active) = active {
                         if active != repo.owner {
                             match sui.get_access_control(&repo.acl_id).await {
@@ -254,7 +256,9 @@ async fn run() -> Result<()> {
                     let repo = sui
                         .get_repo_by_owner_name(&package_id, &owner, &repo_name)
                         .await?
-                        .with_context(|| format!("repository '{}/{}' not found", owner, repo_name))?;
+                        .with_context(|| {
+                            format!("repository '{}/{}' not found", owner, repo_name)
+                        })?;
                     sui_repo = Some(repo);
                 }
                 let repo = sui_repo.as_ref().unwrap();
@@ -295,8 +299,16 @@ async fn run() -> Result<()> {
                 for (src_ref, dst_ref) in &refspecs {
                     let branch = dst_ref.trim_start_matches("refs/heads/");
                     match do_push(
-                        &config, &net, &sui, &walrus, &repo_cfg, &package_id, src_ref, branch,
-                        &repo_dir, &walgit_dir,
+                        &config,
+                        &net,
+                        &sui,
+                        &walrus,
+                        &repo_cfg,
+                        &package_id,
+                        src_ref,
+                        branch,
+                        &repo_dir,
+                        &walgit_dir,
                     )
                     .await
                     {
@@ -383,7 +395,10 @@ async fn do_fetch(
                 net.seal.key_server_url.clone(),
             );
             let acl_v = sui.get_initial_shared_version(&repo.acl_id).await?;
-            let package_id = config.package_id().map_err(|e| anyhow!("{}", e))?.to_string();
+            let package_id = config
+                .package_id()
+                .map_err(|e| anyhow!("{}", e))?
+                .to_string();
             seal.decrypt(
                 &package_id,
                 &repo.id,
@@ -446,9 +461,65 @@ async fn do_push(
     let git_head = walgit::git::rev_parse(repo_dir, src_ref)?;
     let message = walgit::git::get_commit_message(repo_dir, &git_head)?;
 
-    ui::eheader(&format!("push  {} → {}", branch, &git_head[..8]));
-    ui::estep("packing git objects");
-    let raw_pack = walgit::git::pack_objects(repo_dir)?;
+    // ─── Resolve the on-chain branch head (basis for incremental packing) ──
+    // Cost-of-storage and dollar-per-push both fall by 10–100× when each push
+    // uploads only the new commits
+    let parent_commit_id = sui.get_repo_branch_head(&repo_cfg.id, branch).await?;
+    let parent_git_head: Option<String> = match &parent_commit_id {
+        Some(cid) => sui
+            .get_object(cid)
+            .await
+            .ok()
+            .and_then(|obj| obj["git_head"].as_str().map(String::from)),
+        None => None,
+    };
+
+    // Fast-path: local tip already at on-chain tip → nothing to upload.
+    if let Some(parent_sha) = &parent_git_head {
+        if parent_sha == &git_head {
+            ui::eheader(&format!("push  {} → already up-to-date", branch));
+            return Ok(());
+        }
+    }
+
+    // Decide packing mode.
+    //   1. Incremental — we know the on-chain tip and have its commit locally.
+    //   2. Full repack — first push to this branch, or we don't have the
+    //      on-chain commit locally (different machine? rebase?). Slow path,
+    //      but always correct.
+    let (raw_pack, mode_label) = match &parent_git_head {
+        Some(parent_sha) if walgit::git::object_exists(repo_dir, parent_sha) => {
+            let (pack, new_commits) =
+                walgit::git::pack_objects_incremental(repo_dir, &git_head, &[parent_sha.clone()])?;
+            if new_commits == 0 || pack.is_empty() {
+                ui::eheader(&format!("push  {} → already up-to-date", branch));
+                return Ok(());
+            }
+            (
+                pack,
+                format!(
+                    "incremental · {} new commit{}",
+                    new_commits,
+                    if new_commits == 1 { "" } else { "s" }
+                ),
+            )
+        }
+        _ => {
+            let pack = walgit::git::pack_objects(repo_dir)?;
+            (pack, "full pack (no incremental basis)".to_string())
+        }
+    };
+
+    ui::eheader(&format!(
+        "push  {} → {}  [{}]",
+        branch,
+        &git_head[..8],
+        mode_label
+    ));
+    ui::einfo(format!(
+        "pack size: {}",
+        walgit::ui::fmt_bytes(raw_pack.len())
+    ));
 
     let pack_data = if repo_cfg.private {
         ui::estep("encrypting with Seal IBE");
@@ -464,8 +535,9 @@ async fn do_push(
 
     let upload = walrus.upload(pack_data, repo_cfg.epochs).await?;
 
-    // Parent = current branch head on chain (no reliance on local cache).
-    let parent = sui.get_repo_branch_head(&repo_cfg.id, branch).await?;
+    // Parent for the new on-chain Commit object = current on-chain branch
+    // head we resolved above. Same value, no second round-trip.
+    let parent = parent_commit_id.clone();
 
     ui::estep("recording commit on Sui");
     let (commit_id, _gas) = sui

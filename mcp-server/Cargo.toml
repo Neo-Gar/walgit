@@ -7,6 +7,11 @@ authors.workspace = true
 repository.workspace = true
 description = "Model Context Protocol server for WalGit — exposes the CLI as agent-callable tools"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/walgit-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "walgit-{ version }-{ target }/{ bin }{ binary-ext }"
+
 [[bin]]
 name = "walgit-mcp"
 path = "src/main.rs"

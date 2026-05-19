@@ -7,6 +7,11 @@ authors.workspace = true
 repository.workspace = true
 description = "Git remote helper for walgit:// URIs"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/walgit-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "walgit-{ version }-{ target }/{ bin }{ binary-ext }"
+
 [[bin]]
 name = "git-remote-walgit"
 path = "src/main.rs"

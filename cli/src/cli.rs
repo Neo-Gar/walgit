@@ -4,6 +4,7 @@
 //! Clap command surface for the `walgit` CLI binary.
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "walgit", version, about = "Decentralized Git on Walrus + Sui")]
@@ -144,9 +145,137 @@ pub enum AgentAction {
 #[derive(Subcommand)]
 pub enum TraceAction {
     /// Side-by-side diff of two commits' reasoning traces.
-    Diff {
-        sha_a: String,
-        sha_b: String,
+    Diff { sha_a: String, sha_b: String },
+
+    /// Open a pending trace in `.git/walgit/pending-trace.json`. Subsequent
+    /// `record`/`set` calls accumulate into it; the next `git commit` flushes
+    /// it into the commit message footer.
+    Start {
+        /// Free-form agent identifier (e.g. `writer-v1`). Required unless
+        /// `--from-claude-hook` is set.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the auto-generated run_id (UUID/ULID-shaped string).
+        #[arg(long)]
+        run_id: Option<String>,
+        /// One-sentence task description (≤ 200 chars). Can also be set later
+        /// via `walgit trace set --task`.
+        #[arg(long)]
+        task: Option<String>,
+        /// `run_id` of a prior agent action this one is responding to.
+        #[arg(long)]
+        parent_run: Option<String>,
+        /// Adapter source label, surfaced in `walgit trace status`.
+        #[arg(long)]
+        source: Option<String>,
+        /// Decode a Claude Code hook payload from stdin to derive agent_id/run_id.
+        #[arg(long)]
+        from_claude_hook: bool,
+        /// Replace any existing pending trace from a different run.
+        #[arg(long)]
+        force: bool,
+        /// Sentinel string carried only so installed hooks can be identified.
+        /// Ignored by command logic.
+        #[arg(long, hide = true)]
+        tag: Option<String>,
+        /// Exit 0 silently if the current repo is not marked enabled
+        /// (`<git-dir>/walgit/enabled`). Used by the user-global Claude Code
+        /// hooks so they no-op outside opted-in repos.
+        #[arg(long, hide = true)]
+        only_if_enabled: bool,
+    },
+
+    /// Append a tool call (or a Claude Code hook event) to the pending trace.
+    Record {
+        /// Tool name for the manual form.
+        #[arg(long, requires = "input")]
+        name: Option<String>,
+        /// One-line input summary (≤ 200 chars).
+        #[arg(long)]
+        input: Option<String>,
+        /// One-line output summary (≤ 200 chars).
+        #[arg(long)]
+        output: Option<String>,
+        /// Decode stdin as a Claude Code hook payload of the given event.
+        #[arg(long)]
+        from_claude_hook: bool,
+        /// Required with `--from-claude-hook`. One of:
+        /// `user-prompt`, `post-tool-use`, `stop`.
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long, hide = true)]
+        tag: Option<String>,
+        /// See `start --only-if-enabled`.
+        #[arg(long, hide = true)]
+        only_if_enabled: bool,
+    },
+
+    /// Set fields on the pending trace. Repeatable for alternatives.
+    Set {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        decision: Option<String>,
+        /// Append one rejected alternative. May be passed multiple times.
+        #[arg(long)]
+        alternative: Vec<String>,
+        #[arg(long)]
+        confidence: Option<f32>,
+        #[arg(long)]
+        parent_run: Option<String>,
+    },
+
+    /// Show what's currently in the pending trace, if anything.
+    Status,
+
+    /// Discard the pending trace (archives it to `last-trace.json`).
+    Abort,
+
+    /// Internal: called by the `prepare-commit-msg` git hook to inject the
+    /// pending trace into the commit message. Safe to call manually.
+    Flush {
+        #[arg(long)]
+        message_file: PathBuf,
+    },
+
+    /// Install hooks so traces are recorded automatically. Idempotent.
+    ///
+    /// By default writes adapter hooks to BOTH user-global (`~/.claude/`)
+    /// and project-local (`<repo>/.claude/`) settings, installs the git
+    /// hook in this repo, and marks this repo as opted-in via
+    /// `<git-dir>/walgit/enabled`. The global hooks are gated by that
+    /// marker, so other repos aren't affected.
+    ///
+    /// Why both: Cursor's Claude Code extension reads ONLY user-global
+    /// settings, while `claude` CLI in a terminal also picks up
+    /// project-local. Installing in both covers both usage modes without
+    /// double-firing (markers gate the global path).
+    ///
+    /// With no `--agent`, opens an interactive picker. `--agent` accepts a
+    /// single key (`claude-code`), a comma-separated list, or `all`.
+    Install {
+        #[arg(long, value_name = "AGENT[,AGENT…]|all")]
+        agent: Option<String>,
+        /// Skip writing to `~/.claude/settings.json` (project-local only).
+        #[arg(long, conflicts_with = "global_only")]
+        no_global: bool,
+        /// Skip writing to `<repo>/.claude/settings.json` (global only).
+        #[arg(long, conflicts_with = "no_global")]
+        global_only: bool,
+    },
+
+    /// Remove hooks installed by `install`. Preserves user-authored hooks.
+    /// Without `--agent`, sweeps every known adapter.
+    ///
+    /// By default removes the opt-in marker and project-local hooks but
+    /// leaves user-global hooks intact (they're harmless without the
+    /// marker). Pass `--purge-global` to also strip them from
+    /// `~/.claude/settings.json`.
+    Uninstall {
+        #[arg(long, value_name = "AGENT[,AGENT…]|all")]
+        agent: Option<String>,
+        #[arg(long)]
+        purge_global: bool,
     },
 }
 

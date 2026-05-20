@@ -269,6 +269,24 @@ pub fn unpack_objects(repo_path: &Path, pack_data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the absolute path to the `.git/` directory for `repo_path`.
+/// Honours git worktrees (where `.git` is a file pointing elsewhere) and
+/// submodules, so `.git/walgit/` always lands in the right place.
+pub fn git_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+    let out = run(
+        Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(repo_path),
+        "git rev-parse --absolute-git-dir",
+    )?;
+    ensure_ok(&out, "git rev-parse --absolute-git-dir")?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return Err(WalGitError::git("empty git-dir from rev-parse"));
+    }
+    Ok(std::path::PathBuf::from(s))
+}
+
 pub fn rev_parse(repo_path: &Path, refname: &str) -> Result<String> {
     // NOTE: `git rev-parse` is unusual — it literally echoes any unknown arg
     // (including `--end-of-options`) instead of treating it as a separator.

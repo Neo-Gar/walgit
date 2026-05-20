@@ -20,7 +20,14 @@ async fn main() -> Result<()> {
     // Fail fast if global config is incomplete — before any command creates
     // directories, makes network calls, or uploads to Walrus. `config` is the
     // tool used to fix the problem, so it's exempt.
-    if !matches!(cli.command, Command::Config { .. } | Command::Cache { .. }) {
+    // `trace` works against a plain git repo (no `.walgit/` needed) so it must
+    // run even when walgit itself isn't configured for Sui/Walrus yet —
+    // otherwise "turn on the hook in any git repo" would force users through
+    // full walgit setup first.
+    if !matches!(
+        cli.command,
+        Command::Config { .. } | Command::Cache { .. } | Command::Trace { .. }
+    ) {
         if let Err(e) = walgit::commands::preflight() {
             eprintln!();
             eprintln!(
@@ -62,11 +69,113 @@ async fn main() -> Result<()> {
                 trace,
             } => walgit::commands::agent::commit(paths, message, trace).await?,
         },
-        Command::Trace { action } => match action {
-            TraceAction::Diff { sha_a, sha_b } => {
-                walgit::commands::trace::diff(sha_a, sha_b).await?
+        Command::Trace { action } => {
+            use walgit::commands::trace as t;
+            match action {
+                TraceAction::Diff { sha_a, sha_b } => t::diff(sha_a, sha_b).await?,
+                TraceAction::Start {
+                    agent,
+                    run_id,
+                    task,
+                    parent_run,
+                    source,
+                    from_claude_hook,
+                    force,
+                    tag: _,
+                    only_if_enabled,
+                } => {
+                    t::start(t::StartOpts {
+                        agent_id: agent,
+                        run_id,
+                        task,
+                        parent_run_id: parent_run,
+                        source,
+                        from_claude_hook,
+                        force,
+                        only_if_enabled,
+                    })
+                    .await?
+                }
+                TraceAction::Record {
+                    name,
+                    input,
+                    output,
+                    from_claude_hook,
+                    event,
+                    tag: _,
+                    only_if_enabled,
+                } => {
+                    let kind = if from_claude_hook {
+                        let ev = event.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!("--event is required with --from-claude-hook")
+                        })?;
+                        let event = match ev {
+                            "user-prompt" => t::ClaudeEvent::UserPrompt,
+                            "post-tool-use" => t::ClaudeEvent::PostToolUse,
+                            "stop" => t::ClaudeEvent::Stop,
+                            other => {
+                                return Err(anyhow::anyhow!(
+                                    "unknown --event '{}' (expected user-prompt, post-tool-use, stop)",
+                                    other
+                                ));
+                            }
+                        };
+                        t::RecordKind::ClaudeHook { event }
+                    } else {
+                        let name = name.ok_or_else(|| {
+                            anyhow::anyhow!("--name is required (or use --from-claude-hook)")
+                        })?;
+                        t::RecordKind::Tool {
+                            name,
+                            input: input.unwrap_or_default(),
+                            output: output.unwrap_or_default(),
+                        }
+                    };
+                    t::record(kind, only_if_enabled).await?
+                }
+                TraceAction::Set {
+                    task,
+                    decision,
+                    alternative,
+                    confidence,
+                    parent_run,
+                } => {
+                    t::set(t::SetOpts {
+                        task,
+                        decision,
+                        alternative,
+                        confidence,
+                        parent_run_id: parent_run,
+                    })
+                    .await?
+                }
+                TraceAction::Status => t::status().await?,
+                TraceAction::Abort => t::abort().await?,
+                TraceAction::Flush { message_file } => t::flush(message_file).await?,
+                TraceAction::Install {
+                    agent,
+                    no_global,
+                    global_only,
+                } => {
+                    t::install(t::InstallOpts {
+                        agent_arg: agent,
+                        no_global,
+                        global_only,
+                    })
+                    .await?
+                }
+                TraceAction::Uninstall {
+                    agent,
+                    purge_global,
+                } => {
+                    t::uninstall(t::UninstallOpts {
+                        agent_arg: agent,
+                        purge_global,
+                    })
+                    .await?
+                }
             }
-        },
+        }
         Command::Status => walgit::commands::status::run().await?,
         Command::Access { action } => match action {
             AccessAction::List => walgit::commands::access::list().await?,
@@ -132,3 +241,4 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+

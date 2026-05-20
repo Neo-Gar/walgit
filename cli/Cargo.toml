@@ -25,6 +25,7 @@ tokio.workspace = true
 futures.workspace = true
 clap.workspace = true
 console.workspace = true
+dialoguer.workspace = true
 indicatif.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -46,3 +47,6 @@ fastcrypto.workspace = true
 fastcrypto-tbls.workspace = true
 ed25519-dalek.workspace = true
 blake2.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -11,5 +11,6 @@ pub mod types;
 
 pub use client::SuiClient;
 pub use types::{
-    AccessRecord, CommitRecord, GasCost, PullRequestRecord, RepoRecord, seal_id,
+    AccessRecord, CommitRecord, GasCost, MemWalDelegateRecord, PullRequestRecord, RepoRecord,
+    seal_id,
 };

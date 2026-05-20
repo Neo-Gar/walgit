@@ -8,6 +8,7 @@ pub mod config_cmd;
 pub mod fork;
 pub mod init;
 pub mod log;
+pub mod memwal_cmd;
 pub mod pr;
 pub mod show;
 pub mod status;

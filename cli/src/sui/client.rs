@@ -10,8 +10,9 @@ use crate::sui::keystore::KeyPair;
 use crate::sui::queries::Queries;
 use crate::sui::tx::{self, Arg, ExecResult};
 use crate::sui::types::{
-    AccessRecord, CommitRecord, GasCost, PullRequestRecord, RepoRecord,
+    AccessRecord, CommitRecord, GasCost, MemWalDelegateRecord, PullRequestRecord, RepoRecord,
 };
+use base64::Engine as _;
 use std::sync::Arc;
 use sui_graphql::Client as GqlClient;
 
@@ -123,6 +124,132 @@ impl SuiClient {
         self.queries.get_initial_shared_version(id).await
     }
 
+    pub async fn get_object_ref(&self, id: &str) -> Result<(u64, String)> {
+        self.queries.get_object_ref(id).await
+    }
+
+    // ─── MemWal delegate-key management ─────────────────────────────────────
+    //
+    // The MemWalAccount is an OWNED object — only its `owner` Sui address can
+    // call functions on it. In a multi-contributor setup the repo owner runs
+    // these as part of `walgit access grant/revoke`, adding each collaborator's
+    // Ed25519 public key (paired with their Sui address) to the account's
+    // `delegate_keys` table. Once added, the collaborator can write traces
+    // under the same MemWal namespace using their own local delegate key.
+
+    /// Call `memwal::account::add_delegate_key(&mut account, pubkey, addr, label, &clock, &ctx)`.
+    /// `kp` must be the owner of the `MemWalAccount` at `account_id`.
+    pub async fn memwal_add_delegate(
+        &self,
+        kp: &KeyPair,
+        memwal_package_id: &str,
+        account_id: &str,
+        pubkey_bytes: &[u8; 32],
+        delegate_sui_addr: &str,
+        label: &str,
+    ) -> Result<GasCost> {
+        // MemWalAccount is a *shared* object (the contract calls
+        // `share_object` after creation despite `hasPublicTransfer: true`),
+        // so a `&mut` receiver in Move translates to `Arg::Shared { mutable:
+        // true }` here — not `Arg::Owned`. The relayer enforces caller
+        // identity inside the Move function; the PTB just needs the
+        // initialSharedVersion.
+        let shared_v = self.queries.get_initial_shared_version(account_id).await?;
+        let target = sui_sdk_types::Address::from_hex(delegate_sui_addr)
+            .map_err(|e| WalGitError::sui_transaction(format!("bad delegate address: {}", e)))?;
+        let args = vec![
+            Arg::shared(account_id, shared_v, true),
+            Arg::Pure(bcs::to_bytes(&pubkey_bytes.to_vec())?),
+            Arg::Pure(bcs::to_bytes(&target)?),
+            Arg::Pure(bcs::to_bytes(&label.to_string())?),
+            Arg::clock(),
+        ];
+        let result = self
+            .exec(kp, memwal_package_id, "account", "add_delegate_key", args)
+            .await?;
+        Ok(result.gas)
+    }
+
+    pub async fn memwal_remove_delegate(
+        &self,
+        kp: &KeyPair,
+        memwal_package_id: &str,
+        account_id: &str,
+        pubkey_bytes: &[u8; 32],
+    ) -> Result<GasCost> {
+        let shared_v = self.queries.get_initial_shared_version(account_id).await?;
+        let args = vec![
+            Arg::shared(account_id, shared_v, true),
+            Arg::Pure(bcs::to_bytes(&pubkey_bytes.to_vec())?),
+        ];
+        let result = self
+            .exec(
+                kp,
+                memwal_package_id,
+                "account",
+                "remove_delegate_key",
+                args,
+            )
+            .await?;
+        Ok(result.gas)
+    }
+
+    /// Read `MemWalAccount.delegate_keys` from chain. Returns `(label,
+    /// public_key_hex, sui_address)` for each entry — the same fields shown by
+    /// `walgit memwal list`. Fully read-only, no transaction.
+    pub async fn memwal_get_delegates(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<MemWalDelegateRecord>> {
+        let fields = self.queries.get_object(account_id).await?;
+        let mut out = Vec::new();
+        let Some(keys) = fields["delegate_keys"].as_array() else {
+            return Ok(out);
+        };
+        for entry in keys {
+            // Two shapes show up:
+            //  - JSON-RPC: `public_key` is an array of u8 numbers,
+            //              nested under `fields`.
+            //  - GraphQL  (what our Queries layer uses): `public_key` is a
+            //              base64 string at the top level.
+            // Handle both so this function survives indexer changes.
+            let f = entry.get("fields").unwrap_or(entry);
+            let label = f["label"].as_str().unwrap_or("").to_string();
+            let pubkey_hex = pubkey_to_hex(&f["public_key"]);
+            let sui_addr = f["sui_address"].as_str().unwrap_or("").to_string();
+            out.push(MemWalDelegateRecord {
+                label,
+                public_key_hex: pubkey_hex,
+                sui_address: sui_addr,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Normalise a `public_key` value from chain into a lowercase hex string.
+/// GraphQL serializes `vector<u8>` as base64, JSON-RPC as a JSON array of
+/// u8 numbers — accept both so the function isn't tied to one indexer.
+fn pubkey_to_hex(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        // Base64 (GraphQL path).
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s) {
+            return hex::encode(bytes);
+        }
+        // Already hex? Trust the string.
+        return s.trim_start_matches("0x").to_lowercase();
+    }
+    if let Some(arr) = v.as_array() {
+        return arr
+            .iter()
+            .filter_map(|n| n.as_u64().map(|b| b as u8))
+            .map(|b| format!("{:02x}", b))
+            .collect();
+    }
+    String::new()
+}
+
+impl SuiClient {
     // ─── Write operations via PTB ───────────────────────────────────────────
 
     async fn exec(

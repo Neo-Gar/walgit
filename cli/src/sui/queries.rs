@@ -63,6 +63,31 @@ impl Queries {
             .ok_or_else(|| WalGitError::ObjectNotFound(id.to_string()))
     }
 
+    /// Fetch the current `(version, digest)` of an owned object for use as an
+    /// `Input::ImmutableOrOwned` PTB argument. Sui rejects stale refs, so
+    /// callers should fetch this immediately before building the transaction.
+    pub async fn get_object_ref(&self, id: &str) -> Result<(u64, String)> {
+        let data = self
+            .raw(
+                r#"query($id: SuiAddress!) {
+                  object(address: $id) {
+                    version
+                    digest
+                  }
+                }"#,
+                json!({ "id": id }),
+            )
+            .await?;
+        let version = data["object"]["version"]
+            .as_u64()
+            .ok_or_else(|| WalGitError::sui_graphql(format!("no version for object {}", id)))?;
+        let digest = data["object"]["digest"]
+            .as_str()
+            .ok_or_else(|| WalGitError::sui_graphql(format!("no digest for object {}", id)))?
+            .to_string();
+        Ok((version, digest))
+    }
+
     /// Get the `initialSharedVersion` of a shared Sui object — needed for PTB inputs.
     pub async fn get_initial_shared_version(&self, id: &str) -> Result<u64> {
         let data = self

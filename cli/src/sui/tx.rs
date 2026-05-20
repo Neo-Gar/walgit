@@ -39,6 +39,16 @@ pub enum Arg {
         initial_shared_version: u64,
         mutable: bool,
     },
+    /// Immutable-or-owned object reference. Used for owned objects (e.g.,
+    /// `MemWalAccount`) that the sender holds. Caller is responsible for
+    /// fetching the *current* version+digest immediately before building
+    /// the transaction — Sui rejects stale refs with "object version mismatch".
+    Owned {
+        id: String,
+        version: u64,
+        /// Base58 object digest as returned by `sui_getObject`.
+        digest: String,
+    },
 }
 
 impl Arg {
@@ -51,6 +61,14 @@ impl Arg {
             id: id.into(),
             initial_shared_version,
             mutable,
+        }
+    }
+
+    pub fn owned(id: impl Into<String>, version: u64, digest: impl Into<String>) -> Self {
+        Arg::Owned {
+            id: id.into(),
+            version,
+            digest: digest.into(),
         }
     }
 
@@ -104,7 +122,89 @@ impl ExecResult {
 }
 
 /// Build, sign, and execute a single Move call as a programmable transaction.
+///
+/// Retries once with fresh gas-coin refs when Sui rejects the request with a
+/// "unavailable for consumption" error — that happens whenever two
+/// transactions land back-to-back and the indexer hasn't yet surfaced the
+/// new gas-coin version. Without this retry, two-step flows like `walgit
+/// access grant --memwal-pubkey` (walgit ACL + MemWal delegate in
+/// sequence) fail the second call.
 pub async fn execute_move_call(
+    graphql: &GqlClient,
+    graphql_url: &str,
+    keypair: &KeyPair,
+    package_id: &str,
+    module: &str,
+    function: &str,
+    args: Vec<Arg>,
+    gas_budget: u64,
+) -> Result<ExecResult> {
+    // We need to clone args once because the inner builder consumes them.
+    // The retry path rebuilds from these cloned args.
+    let attempts = 3;
+    let mut last_err: Option<WalGitError> = None;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            // Linear backoff so the GraphQL indexer catches up to the
+            // most recent gas-coin mutation before we try again.
+            tokio::time::sleep(std::time::Duration::from_millis(800 * attempt as u64)).await;
+        }
+        match execute_move_call_once(
+            graphql,
+            graphql_url,
+            keypair,
+            package_id,
+            module,
+            function,
+            clone_args(&args),
+            gas_budget,
+        )
+        .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                let msg = format!("{}", e);
+                if msg.contains("unavailable for consumption")
+                    || msg.contains("ObjectVersionUnavailable")
+                {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| WalGitError::sui_transaction("retry exhausted".to_string())))
+}
+
+fn clone_args(args: &[Arg]) -> Vec<Arg> {
+    args.iter()
+        .map(|a| match a {
+            Arg::Pure(b) => Arg::Pure(b.clone()),
+            Arg::Shared {
+                id,
+                initial_shared_version,
+                mutable,
+            } => Arg::Shared {
+                id: id.clone(),
+                initial_shared_version: *initial_shared_version,
+                mutable: *mutable,
+            },
+            Arg::Owned {
+                id,
+                version,
+                digest,
+            } => Arg::Owned {
+                id: id.clone(),
+                version: *version,
+                digest: digest.clone(),
+            },
+        })
+        .collect()
+}
+
+/// Single attempt of the move call. Caller handles retry semantics.
+async fn execute_move_call_once(
     _graphql: &GqlClient,
     graphql_url: &str,
     keypair: &KeyPair,
@@ -131,6 +231,20 @@ pub async fn execute_move_call(
                 initial_shared_version,
                 mutable,
             )),
+            Arg::Owned {
+                id,
+                version,
+                digest,
+            } => {
+                let digest_parsed = digest.parse::<sui_sdk_types::Digest>().map_err(|e| {
+                    WalGitError::sui_transaction(format!("bad object digest '{}': {}", digest, e))
+                })?;
+                Input::ImmutableOrOwned(ObjectReference::new(
+                    parse_address(&id)?,
+                    version,
+                    digest_parsed,
+                ))
+            }
         };
         inputs.push(input);
         arg_refs.push(sui_sdk_types::Argument::Input(i as u16));

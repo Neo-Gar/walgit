@@ -58,6 +58,12 @@ pub enum Command {
         action: TraceAction,
     },
 
+    /// MemWal — manage delegate keys and on-chain `MemWalAccount.delegate_keys`.
+    Memwal {
+        #[command(subcommand)]
+        action: MemwalAction,
+    },
+
     /// Show repository status.
     Status,
 
@@ -116,13 +122,63 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum MemwalAction {
+    /// Generate a local Ed25519 delegate keypair and refresh `[memwal]` config.
+    /// Prints the public part for the repo owner to register.
+    Init {
+        /// Overwrite the existing delegate key if one is already on disk.
+        #[arg(long)]
+        force: bool,
+        /// Set `memwal.account_id` in the global config.
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Override the relayer URL (defaults to staging on testnet,
+        /// production on mainnet).
+        #[arg(long)]
+        relayer_url: Option<String>,
+    },
+    /// Show local delegate identity and whether it's registered on chain.
+    Status,
+    /// List all delegates on the configured `MemWalAccount`.
+    List,
+    /// Owner-only: register `<pubkey-hex>` paired with `<sui-address>` as a
+    /// delegate on the configured `MemWalAccount`.
+    AddDelegate {
+        pubkey_hex: String,
+        sui_address: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Owner-only: remove a delegate by its public key.
+    RemoveDelegate { pubkey_hex: String },
+}
+
+#[derive(Subcommand)]
 pub enum AccessAction {
     /// List allowed readers and writers.
     List,
-    /// Grant access. role = "read" or "write".
-    Grant { role: String, address: String },
-    /// Revoke access. role = "read" or "write".
-    Revoke { role: String, address: String },
+    /// Grant access. role = "read" or "write". With `--memwal-pubkey` also
+    /// registers the collaborator's delegate key on the repo's
+    /// `MemWalAccount` so they can write reasoning traces.
+    Grant {
+        role: String,
+        address: String,
+        /// Hex Ed25519 public key shared by the collaborator (32 bytes /
+        /// 64 hex chars). Skip to only update the walgit ACL.
+        #[arg(long)]
+        memwal_pubkey: Option<String>,
+        /// Free-form label for the delegate entry.
+        #[arg(long, default_value = "walgit")]
+        memwal_label: String,
+    },
+    /// Revoke access. role = "read" or "write". With `--memwal-pubkey`
+    /// also removes the delegate from `MemWalAccount`.
+    Revoke {
+        role: String,
+        address: String,
+        #[arg(long)]
+        memwal_pubkey: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

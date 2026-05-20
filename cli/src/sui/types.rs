@@ -103,6 +103,17 @@ impl PullRequestRecord {
     }
 }
 
+/// One entry in `MemWalAccount.delegate_keys`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MemWalDelegateRecord {
+    /// Free-form name attached by the owner at add-time (e.g. `"Alice (laptop)"`).
+    pub label: String,
+    /// Hex Ed25519 public key (32 bytes → 64 hex chars).
+    pub public_key_hex: String,
+    /// Sui address of the delegate's wallet.
+    pub sui_address: String,
+}
+
 /// Seal IBE identity for a repository: `package_id_bytes ++ repo_id_bytes` (64 bytes).
 pub fn seal_id(package_id: &str, repo_id: &str) -> Vec<u8> {
     let pkg = hex::decode(package_id.trim_start_matches("0x")).unwrap_or_default();

@@ -750,47 +750,33 @@ pub async fn recall(query: String, limit: u32, namespace_override: Option<String
     Ok(())
 }
 
-/// Pack a snapshot into the textual form MemWal indexes. Kept stable so
-/// semantic recall over multiple commits stays consistent.
-fn format_for_memwal(commit_sha: &str, pt: &PendingTrace) -> String {
-    let mut s = String::new();
-    s.push_str(&format!("commit: {}\n", commit_sha));
-    s.push_str(&format!("agent:  {}\n", pt.agent_id));
-    s.push_str(&format!("run:    {}\n", pt.run_id));
-    if let Some(p) = &pt.parent_run_id {
-        s.push_str(&format!("parent: {}\n", p));
-    }
-    s.push_str(&format!(
-        "task:   {}\n",
-        if pt.task.trim().is_empty() {
-            "(none)"
-        } else {
-            &pt.task
-        }
-    ));
-    s.push_str("\n");
-    if !pt.tools_called.is_empty() {
-        s.push_str("tools:\n");
-        for tc in &pt.tools_called {
-            s.push_str(&format!(
-                "  · {} {} → {}\n",
-                tc.name, tc.input_summary, tc.output_summary
-            ));
-        }
-        s.push_str("\n");
-    }
-    if !pt.decision.trim().is_empty() {
-        s.push_str("decision:\n");
-        s.push_str(&pt.decision);
-        s.push_str("\n");
-    }
-    if !pt.alternatives_considered.is_empty() {
-        s.push_str("\nalternatives:\n");
-        for a in &pt.alternatives_considered {
-            s.push_str(&format!("  ✗ {}\n", a));
-        }
-    }
-    s
+/// Header line stamped at the top of every MemWal payload so that `walgit
+/// show --trace <sha>` can recall by exact commit SHA and recognise our own
+/// uploads (vs. arbitrary entries someone put into the namespace).
+const MEMWAL_HEADER_PREFIX: &str = "walgit-trace commit:";
+
+/// Pack a snapshot for MemWal indexing.
+///
+/// Format: one-line header (`walgit-trace commit:<sha>`) followed by the
+/// raw `PendingTrace` JSON body. Both parts are embedded in `text` for the
+/// relayer to embed; on read we strip the header and reparse the JSON to
+/// reconstruct a typed [`Trace`]. The header is also a strong semantic
+/// signal — a recall query containing `<sha>` will preferentially match.
+pub fn format_for_memwal(commit_sha: &str, pt: &PendingTrace) -> String {
+    let body = serde_json::to_string_pretty(pt).unwrap_or_else(|_| "{}".to_string());
+    format!("{}{}\n{}", MEMWAL_HEADER_PREFIX, commit_sha, body)
+}
+
+/// Inverse of [`format_for_memwal`]. Returns `Some((commit_sha, PendingTrace))`
+/// when `text` is something we wrote; `None` if it doesn't match our shape
+/// (e.g., a user manually put a different memory in the same namespace).
+pub fn parse_memwal_payload(text: &str) -> Option<(String, PendingTrace)> {
+    let mut lines = text.lines();
+    let header = lines.next()?;
+    let sha = header.strip_prefix(MEMWAL_HEADER_PREFIX)?.trim().to_string();
+    let body: String = lines.collect::<Vec<_>>().join("\n");
+    let pt: PendingTrace = serde_json::from_str(body.trim()).ok()?;
+    Some((sha, pt))
 }
 
 /// Pick a stable MemWal namespace for the current repo.

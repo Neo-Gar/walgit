@@ -29,6 +29,24 @@
 
 pub mod auth;
 
+/// Package ID of the MemWal Move contract on testnet.
+pub const TESTNET_PACKAGE_ID: &str =
+    "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6";
+/// Package ID on mainnet.
+pub const MAINNET_PACKAGE_ID: &str =
+    "0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6";
+
+/// Resolve the on-chain MemWal package ID for the network `walgit` is
+/// currently configured for. Used by `walgit access grant` to call into
+/// `memwal::account::add_delegate_key`.
+pub fn package_id_for_network(network: &str) -> Option<&'static str> {
+    match network {
+        "testnet" => Some(TESTNET_PACKAGE_ID),
+        "mainnet" => Some(MAINNET_PACKAGE_ID),
+        _ => None,
+    }
+}
+
 use crate::error::{Result, WalGitError};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

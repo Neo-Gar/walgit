@@ -3,7 +3,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use walgit::cli::{AccessAction, AgentAction, CacheAction, Cli, Command, PrAction, TraceAction};
+use walgit::cli::{
+    AccessAction, AgentAction, CacheAction, Cli, Command, MemwalAction, PrAction, TraceAction,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +26,10 @@ async fn main() -> Result<()> {
     // full walgit setup first.
     if !matches!(
         cli.command,
-        Command::Config { .. } | Command::Cache { .. } | Command::Trace { .. }
+        Command::Config { .. }
+            | Command::Cache { .. }
+            | Command::Trace { .. }
+            | Command::Memwal { .. }
     ) {
         if let Err(e) = walgit::commands::preflight() {
             eprintln!();
@@ -180,15 +185,42 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Memwal { action } => {
+            use walgit::commands::memwal_cmd as m;
+            match action {
+                MemwalAction::Init {
+                    force,
+                    account_id,
+                    relayer_url,
+                } => m::init(force, account_id, relayer_url).await?,
+                MemwalAction::Status => m::status().await?,
+                MemwalAction::List => m::list().await?,
+                MemwalAction::AddDelegate {
+                    pubkey_hex,
+                    sui_address,
+                    label,
+                } => m::add_delegate(pubkey_hex, sui_address, label).await?,
+                MemwalAction::RemoveDelegate { pubkey_hex } => {
+                    m::remove_delegate(pubkey_hex).await?
+                }
+            }
+        }
         Command::Status => walgit::commands::status::run().await?,
         Command::Access { action } => match action {
             AccessAction::List => walgit::commands::access::list().await?,
-            AccessAction::Grant { role, address } => {
-                walgit::commands::access::grant(role, address).await?
+            AccessAction::Grant {
+                role,
+                address,
+                memwal_pubkey,
+                memwal_label,
+            } => {
+                walgit::commands::access::grant(role, address, memwal_pubkey, memwal_label).await?
             }
-            AccessAction::Revoke { role, address } => {
-                walgit::commands::access::revoke(role, address).await?
-            }
+            AccessAction::Revoke {
+                role,
+                address,
+                memwal_pubkey,
+            } => walgit::commands::access::revoke(role, address, memwal_pubkey).await?,
         },
         Command::Fork { url, yes } => walgit::commands::fork::run(url, yes).await?,
         Command::Cache { action } => match action {

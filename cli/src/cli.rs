@@ -4,7 +4,6 @@
 //! Clap command surface for the `walgit` CLI binary.
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "walgit", version, about = "Decentralized Git on Walrus + Sui")]
@@ -231,11 +230,35 @@ pub enum TraceAction {
     /// Discard the pending trace (archives it to `last-trace.json`).
     Abort,
 
-    /// Internal: called by the `prepare-commit-msg` git hook to inject the
-    /// pending trace into the commit message. Safe to call manually.
-    Flush {
+    /// Internal: called by the `post-commit` git hook to snapshot the pending
+    /// trace as `<git-dir>/walgit/traces/<HEAD-sha>.json`. Safe to call
+    /// manually if you want to retroactively associate the current pending
+    /// trace with the freshly-created commit.
+    Snapshot {
+        /// Override the commit SHA to write under. Defaults to HEAD.
         #[arg(long)]
-        message_file: PathBuf,
+        commit: Option<String>,
+    },
+
+    /// Upload local trace snapshots to MemWal. Without args uploads everything
+    /// in `<git-dir>/walgit/traces/`; with `<sha>` uploads only that one.
+    Upload {
+        /// Specific commit SHA to upload. Without it, uploads all snapshots.
+        commit: Option<String>,
+        /// MemWal namespace override. Defaults to the current repo name.
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+
+    /// Semantic search across the project's MemWal namespace. Surfaces past
+    /// reasoning traces relevant to the query.
+    Recall {
+        /// Natural-language query.
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+        #[arg(long)]
+        namespace: Option<String>,
     },
 
     /// Install hooks so traces are recorded automatically. Idempotent.

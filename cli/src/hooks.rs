@@ -35,20 +35,24 @@ pub const CLAUDE_HOOK_TAG: &str = "walgit-trace-managed";
 
 // ─── Git hooks ──────────────────────────────────────────────────────────────
 
-/// Body of the `prepare-commit-msg` hook. It is intentionally tiny: all real
-/// work lives in `walgit trace flush`, which is responsible for being a no-op
-/// when there is no pending trace (so plain `git commit` keeps working).
+/// Body of the `post-commit` hook. Runs after `git commit` succeeds, so
+/// `HEAD` already points at the freshly-created commit. `walgit trace
+/// snapshot` reads the pending-trace accumulator and saves it under
+/// `traces/<HEAD-sha>.json` for later upload to MemWal at push time.
 ///
-/// The hook receives the message file path as `$1`. We pass it through and
-/// ignore $2/$3 (source/sha) — flushing semantics don't depend on those.
-fn prepare_commit_msg_body() -> String {
+/// Why `post-commit` instead of `prepare-commit-msg`: with MemWal as the
+/// authoritative trace store, we don't write into the commit message
+/// (`footer = nothing`). The commit SHA stays clean. Capturing the SHA
+/// *after* commit also lets us key local cache by SHA, so amend/rebase
+/// gracefully orphan rather than silently corrupt.
+fn post_commit_body() -> String {
     format!(
         r#"{begin}
 {sentinel}
-# Appends the pending reasoning trace (if any) into the commit message.
-# Safe to keep enabled — exits 0 silently when there's no pending trace.
+# Snapshots the pending reasoning trace (if any) into <git-dir>/walgit/traces/<sha>.json.
+# Exits 0 silently when there's no pending trace, so plain `git commit` keeps working.
 if command -v walgit >/dev/null 2>&1; then
-    walgit trace flush --message-file "$1" || exit $?
+    walgit trace snapshot >/dev/null 2>&1 || true
 fi
 {end}
 "#,
@@ -58,60 +62,68 @@ fi
     )
 }
 
-/// Install (or re-install) walgit's `prepare-commit-msg` block into the git
-/// hook for `git_dir`. If a hook script already exists with non-walgit
-/// content, we preserve it and inject our managed block at the end so both
-/// run. Idempotent.
+/// Install (or re-install) walgit's managed block into `<git-dir>/hooks/post-commit`.
+/// Existing user content in the hook file is preserved verbatim. Also strips
+/// any legacy walgit block in `prepare-commit-msg` from older installs.
+/// Idempotent.
 pub fn install_git_hook(git_dir: &Path) -> Result<PathBuf> {
+    // Sweep stale legacy hook from when we used to inject a commit-msg footer.
+    let _ = uninstall_managed_block(&git_dir.join("hooks").join("prepare-commit-msg"));
+
     let hooks_dir = git_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
-    let hook = hooks_dir.join("prepare-commit-msg");
+    let hook = hooks_dir.join("post-commit");
+    upsert_managed_block(&hook, &post_commit_body())?;
+    make_executable(&hook)?;
+    Ok(hook)
+}
 
+/// Remove walgit's block from both possible hook files (post-commit + legacy
+/// prepare-commit-msg). Returns true if at least one file changed.
+pub fn uninstall_git_hook(git_dir: &Path) -> Result<bool> {
+    let a = uninstall_managed_block(&git_dir.join("hooks").join("post-commit"))?;
+    let b = uninstall_managed_block(&git_dir.join("hooks").join("prepare-commit-msg"))?;
+    Ok(a || b)
+}
+
+fn upsert_managed_block(hook: &Path, body: &str) -> Result<()> {
     let existing = if hook.exists() {
-        std::fs::read_to_string(&hook)?
+        std::fs::read_to_string(hook)?
     } else {
         String::new()
     };
-
     let cleaned = strip_managed_block(&existing);
     let mut combined = if cleaned.trim().is_empty() {
         "#!/usr/bin/env sh\n".to_string()
     } else if cleaned.starts_with("#!") {
         cleaned
     } else {
-        // Pre-existing hook without a shebang — extremely rare, but inject one
-        // so the chained script is executable.
         format!("#!/usr/bin/env sh\n{}", cleaned)
     };
     if !combined.ends_with('\n') {
         combined.push('\n');
     }
-    combined.push_str(&prepare_commit_msg_body());
-
-    std::fs::write(&hook, &combined)?;
-    make_executable(&hook)?;
-    Ok(hook)
+    combined.push_str(body);
+    std::fs::write(hook, &combined)?;
+    Ok(())
 }
 
-/// Remove walgit's block from `prepare-commit-msg`. If the result is just a
-/// bare shebang (or empty), delete the file entirely so we don't leave a
-/// useless stub behind. Idempotent.
-pub fn uninstall_git_hook(git_dir: &Path) -> Result<bool> {
-    let hook = git_dir.join("hooks").join("prepare-commit-msg");
+fn uninstall_managed_block(hook: &Path) -> Result<bool> {
     if !hook.exists() {
         return Ok(false);
     }
-    let existing = std::fs::read_to_string(&hook)?;
+    let existing = std::fs::read_to_string(hook)?;
+    if !existing.contains(SHELL_BEGIN) {
+        return Ok(false);
+    }
     let cleaned = strip_managed_block(&existing);
-    let trimmed_is_empty = cleaned
+    let trimmed_is_empty = !cleaned
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("#!"))
-        .next()
-        .is_none();
+        .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with("#!"));
     if trimmed_is_empty {
-        std::fs::remove_file(&hook)?;
+        std::fs::remove_file(hook)?;
     } else {
-        std::fs::write(&hook, cleaned)?;
+        std::fs::write(hook, cleaned)?;
     }
     Ok(true)
 }
@@ -354,14 +366,15 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn install_git_hook_creates_executable_script() {
+    fn install_git_hook_creates_executable_post_commit() {
         let td = TempDir::new().unwrap();
         let hook = install_git_hook(td.path()).unwrap();
         assert!(hook.exists());
+        assert_eq!(hook.file_name().unwrap(), "post-commit");
         let body = std::fs::read_to_string(&hook).unwrap();
         assert!(body.contains(SHELL_BEGIN));
         assert!(body.contains(SHELL_END));
-        assert!(body.contains("walgit trace flush"));
+        assert!(body.contains("walgit trace snapshot"));
     }
 
     #[test]
@@ -370,13 +383,13 @@ mod tests {
         let hooks_dir = td.path().join("hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         let user_body = "#!/bin/sh\necho 'user hook ran'\n";
-        let hook = hooks_dir.join("prepare-commit-msg");
+        let hook = hooks_dir.join("post-commit");
         std::fs::write(&hook, user_body).unwrap();
 
         install_git_hook(td.path()).unwrap();
         let combined = std::fs::read_to_string(&hook).unwrap();
         assert!(combined.contains("user hook ran"));
-        assert!(combined.contains("walgit trace flush"));
+        assert!(combined.contains("walgit trace snapshot"));
     }
 
     #[test]
@@ -384,10 +397,32 @@ mod tests {
         let td = TempDir::new().unwrap();
         install_git_hook(td.path()).unwrap();
         install_git_hook(td.path()).unwrap();
-        let body = std::fs::read_to_string(td.path().join("hooks/prepare-commit-msg")).unwrap();
-        // Exactly one BEGIN/END pair regardless of how many times we install.
+        let body = std::fs::read_to_string(td.path().join("hooks/post-commit")).unwrap();
         assert_eq!(body.matches(SHELL_BEGIN).count(), 1);
         assert_eq!(body.matches(SHELL_END).count(), 1);
+    }
+
+    #[test]
+    fn install_git_hook_strips_legacy_prepare_commit_msg() {
+        // Simulate an old install that left a managed block in prepare-commit-msg.
+        let td = TempDir::new().unwrap();
+        let hooks_dir = td.path().join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let legacy = format!(
+            "#!/usr/bin/env sh\n{}\nwalgit trace flush --message-file \"$1\"\n{}\n",
+            SHELL_BEGIN, SHELL_END
+        );
+        std::fs::write(hooks_dir.join("prepare-commit-msg"), &legacy).unwrap();
+
+        install_git_hook(td.path()).unwrap();
+        // Legacy hook should be gone (or at least our block stripped).
+        let leftover = std::fs::read_to_string(hooks_dir.join("prepare-commit-msg")).ok();
+        assert!(
+            leftover.is_none() || !leftover.unwrap().contains("walgit trace flush"),
+            "legacy prepare-commit-msg should be cleaned up"
+        );
+        // post-commit is now installed.
+        assert!(hooks_dir.join("post-commit").exists());
     }
 
     #[test]
@@ -396,7 +431,7 @@ mod tests {
         let hooks_dir = td.path().join("hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         let user_body = "#!/bin/sh\necho 'mine'\n";
-        let hook = hooks_dir.join("prepare-commit-msg");
+        let hook = hooks_dir.join("post-commit");
         std::fs::write(&hook, user_body).unwrap();
 
         install_git_hook(td.path()).unwrap();
@@ -412,8 +447,7 @@ mod tests {
         let td = TempDir::new().unwrap();
         install_git_hook(td.path()).unwrap();
         uninstall_git_hook(td.path()).unwrap();
-        // No user content → file should be gone, not left as `#!/usr/bin/env sh` stub.
-        assert!(!td.path().join("hooks/prepare-commit-msg").exists());
+        assert!(!td.path().join("hooks/post-commit").exists());
     }
 
     #[test]

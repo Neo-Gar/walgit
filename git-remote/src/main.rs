@@ -521,6 +521,37 @@ async fn do_push(
         walgit::ui::fmt_bytes(raw_pack.len())
     ));
 
+    // ─── MemWal trace upload (only when traces are activated for this repo) ──
+    // Done BEFORE the Walrus blob upload + Sui commit so a relayer outage
+    // aborts the push without wasting storage/gas fees. No-op if the repo
+    // doesn't have `<git-dir>/walgit/enabled`.
+    let git_dir = walgit::git::git_dir(repo_dir)?;
+    // Namespace = on-chain repo ID — stable across machines and contributors.
+    let namespace = &repo_cfg.id;
+    match walgit::commands::trace::upload_for_push(
+        repo_dir,
+        &git_dir,
+        namespace,
+        &git_head,
+        parent_git_head.as_deref(),
+    )
+    .await
+    {
+        Ok(s) if s.attempted == 0 => {} // nothing to upload — quiet path
+        Ok(s) => {
+            ui::einfo(format!(
+                "MemWal: uploaded {} trace(s)  (already done: {})",
+                s.uploaded, s.skipped_already_uploaded
+            ));
+        }
+        Err(e) => bail!(
+            "MemWal trace upload failed before Walrus upload: {}\n\
+             Push aborted to keep code state in sync with traces. Fix MemWal connectivity \
+             and retry — local snapshots are preserved in <git-dir>/walgit/traces/.",
+            e
+        ),
+    }
+
     let pack_data = if repo_cfg.private {
         ui::estep("encrypting with Seal IBE");
         let seal = walgit::SealClient::new(

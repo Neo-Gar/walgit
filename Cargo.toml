@@ -53,6 +53,8 @@ fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f8
 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 blake2 = "0.10"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 
 [patch."https://github.com/MystenLabs/sui-rust-sdk.git"]
 sui-sdk-types = { version = "=0.3.1" }

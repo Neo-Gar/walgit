@@ -152,6 +152,57 @@ pub fn enabled_path(git_dir: &Path) -> PathBuf {
     walgit_dir(git_dir).join("enabled")
 }
 
+/// Per-commit trace snapshots live here. The `post-commit` hook drops one
+/// JSON file per commit (`<sha>.json`); push-time upload reads from this
+/// directory and ships entries to MemWal.
+pub fn traces_dir(git_dir: &Path) -> PathBuf {
+    walgit_dir(git_dir).join("traces")
+}
+
+pub fn trace_path(git_dir: &Path, commit_sha: &str) -> PathBuf {
+    traces_dir(git_dir).join(format!("{}.json", commit_sha))
+}
+
+/// Persist `pt` as `traces/<commit_sha>.json`. Atomic; creates dirs on demand.
+pub fn save_snapshot(git_dir: &Path, commit_sha: &str, pt: &PendingTrace) -> Result<PathBuf> {
+    let dir = traces_dir(git_dir);
+    std::fs::create_dir_all(&dir)?;
+    let final_path = trace_path(git_dir, commit_sha);
+    let tmp_path = dir.join(format!("{}.json.tmp", commit_sha));
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(pt)?)?;
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(final_path)
+}
+
+/// Enumerate snapshots present locally. Used by `walgit trace upload --all`
+/// to figure out which commits still need to ship to MemWal.
+pub fn list_snapshots(git_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let dir = traces_dir(git_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Skip the `.tmp` partials atomic-rename can leave on crash.
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        out.push((stem.to_string(), p));
+    }
+    Ok(out)
+}
+
+pub fn load_snapshot(path: &Path) -> Result<PendingTrace> {
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str(&raw)
+        .map_err(|e| WalGitError::other(format!("snapshot {} parse: {}", path.display(), e)))
+}
+
 pub fn is_enabled(git_dir: &Path) -> bool {
     enabled_path(git_dir).exists()
 }

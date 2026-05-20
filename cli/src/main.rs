@@ -3,9 +3,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use walgit::cli::{
-    AccessAction, AgentAction, CacheAction, Cli, Command, PrAction, TraceAction,
-};
+use walgit::cli::{AccessAction, AgentAction, CacheAction, Cli, Command, PrAction, TraceAction};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -151,7 +149,13 @@ async fn main() -> Result<()> {
                 }
                 TraceAction::Status => t::status().await?,
                 TraceAction::Abort => t::abort().await?,
-                TraceAction::Flush { message_file } => t::flush(message_file).await?,
+                TraceAction::Snapshot { commit } => t::snapshot(commit).await?,
+                TraceAction::Upload { commit, namespace } => t::upload(commit, namespace).await?,
+                TraceAction::Recall {
+                    query,
+                    limit,
+                    namespace,
+                } => t::recall(query, limit, namespace).await?,
                 TraceAction::Install {
                     agent,
                     no_global,
@@ -241,4 +245,3 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
-

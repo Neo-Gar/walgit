@@ -461,39 +461,357 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
-// ─── flush (called by prepare-commit-msg hook) ──────────────────────────────
+// ─── push-flow integration ──────────────────────────────────────────────────
 
-/// Read the commit message file at `path`, attach the pending trace as a
-/// footer, write the file back. On absence of a pending trace, exits Ok
-/// without touching the message — keeps plain `git commit` working.
-pub async fn flush(message_file: PathBuf) -> Result<()> {
-    let git_dir = current_git_dir()?;
-    let Some(pt) = trace_pending::load(&git_dir)? else {
-        return Ok(()); // no pending → no-op
+/// Drain local trace snapshots for the commits being pushed and ship them
+/// synchronously to MemWal. Called from `git-remote-walgit::do_push` BEFORE
+/// the Walrus upload, so a MemWal failure aborts the push without wasting
+/// storage fees on the repo blob.
+///
+/// Semantics:
+///
+/// - Opt-in: if `<git-dir>/walgit/enabled` is missing, returns Ok with no
+///   work — push is unaffected for users who don't want trace recording.
+/// - If MemWal isn't configured but the repo is opted-in, returns a friendly
+///   error so the user can fix it instead of silently dropping traces.
+/// - Walks `git rev-list parent..head` and uploads every commit whose
+///   snapshot exists locally. Commits without a snapshot (e.g., made
+///   before `walgit trace install`) are silently skipped — they predate
+///   the system, no trace was ever captured.
+/// - On the first failed upload, returns Err and stops. The pending
+///   snapshots stay in `traces/` so retry on the next push picks them up.
+pub async fn upload_for_push(
+    repo_dir: &Path,
+    git_dir: &Path,
+    namespace: &str,
+    head_sha: &str,
+    parent_sha: Option<&str>,
+) -> Result<UploadPushSummary> {
+    use crate::memwal::MemWalClient;
+
+    if !trace_pending::is_enabled(git_dir) {
+        return Ok(UploadPushSummary::default()); // not opted-in
+    }
+
+    // Enumerate commits being pushed (newest first by default; order doesn't
+    // matter for upload, but we keep `git rev-list`'s order for logging).
+    let shas = revs_in_push(repo_dir, head_sha, parent_sha)?;
+
+    // Cross-reference against local snapshots: only those with files are
+    // candidates. Missing ones are silently ignored.
+    let candidates: Vec<(String, std::path::PathBuf)> = shas
+        .iter()
+        .map(|sha| (sha.clone(), trace_pending::trace_path(git_dir, sha)))
+        .filter(|(_, p)| p.exists())
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(UploadPushSummary::default());
+    }
+
+    let cfg = crate::config::load()?;
+    let mw = cfg.memwal.as_ref().ok_or_else(|| {
+        WalGitError::other(
+            "this repo has reasoning traces enabled (\
+             `walgit trace install` marker is present) but [memwal] is not \
+             configured. Either configure MemWal in ~/.walgit/config.toml, or \
+             run `walgit trace uninstall` to disable trace upload for this repo.",
+        )
+    })?;
+    let priv_bytes = mw.load_delegate_key()?;
+    let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
+
+    let mut summary = UploadPushSummary {
+        attempted: candidates.len(),
+        uploaded: 0,
+        skipped_already_uploaded: 0,
     };
 
-    // Avoid double-application on amend / rebase: if the existing message
-    // already carries our marker, don't re-inject — that would either nest
-    // markers or quietly duplicate a stale trace.
-    let existing = std::fs::read_to_string(&message_file)?;
-    if existing.contains(trace::TRACE_MARKER) {
+    for (sha, path) in candidates {
+        // Idempotency: if a `.uploaded` sibling marker is present, the
+        // snapshot was already shipped on a prior push (e.g. a previous
+        // upload succeeded but the consumer-side cleanup hadn't run).
+        let marker = path.with_extension("uploaded");
+        if marker.exists() {
+            summary.skipped_already_uploaded += 1;
+            continue;
+        }
+
+        let pt = trace_pending::load_snapshot(&path)?;
+        let text = format_for_memwal(&sha, &pt);
+        client
+            .remember(&text, Some(namespace))
+            .await
+            .map_err(|e| WalGitError::other(format!("MemWal upload for {}: {}", sha, e)))?;
+
+        // Mark as uploaded so a re-push doesn't double-ship. We deliberately
+        // do NOT delete the snapshot — keeping it lets `walgit show --trace`
+        // resolve from local cache without a network round-trip.
+        std::fs::write(&marker, "")?;
+        summary.uploaded += 1;
+    }
+
+    Ok(summary)
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct UploadPushSummary {
+    pub attempted: usize,
+    pub uploaded: usize,
+    pub skipped_already_uploaded: usize,
+}
+
+/// `git rev-list parent..head` (or `head` alone if no parent). Returns the
+/// list of full SHAs that this push is making canonical. The list may be
+/// empty when nothing changed.
+fn revs_in_push(repo_dir: &Path, head: &str, parent: Option<&str>) -> Result<Vec<String>> {
+    use std::process::Command;
+    let mut args: Vec<String> = vec!["rev-list".into()];
+    match parent {
+        Some(p) => args.push(format!("{}..{}", p, head)),
+        None => args.push(head.to_string()),
+    }
+    let out = Command::new("git")
+        .args(args.iter().map(String::as_str))
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| WalGitError::git(format!("git rev-list: {}", e)))?;
+    if !out.status.success() {
+        return Err(WalGitError::git(format!(
+            "git rev-list {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+// ─── snapshot (called by post-commit hook) ──────────────────────────────────
+
+/// Move the pending trace to `traces/<commit_sha>.json`. Default commit is
+/// `HEAD` (the freshly-created one when invoked from a post-commit hook).
+///
+/// Silently no-ops when there's no pending trace, so the hook never causes
+/// `git commit` to fail and never produces stderr noise on plain commits.
+pub async fn snapshot(commit_sha: Option<String>) -> Result<()> {
+    let git_dir = current_git_dir()?;
+    let Some(pt) = trace_pending::load(&git_dir)? else {
+        return Ok(());
+    };
+
+    let sha = match commit_sha {
+        Some(s) => s,
+        None => {
+            // We're after `git commit`; HEAD is the new commit. Get the full SHA.
+            let cwd = std::env::current_dir()?;
+            git::rev_parse(&cwd, "HEAD")?
+        }
+    };
+
+    let path = trace_pending::save_snapshot(&git_dir, &sha, &pt)?;
+    // Move pending → last so the next commit starts fresh.
+    let _ = trace_pending::consume(&git_dir)?;
+    // Hook output is suppressed; this only matters when invoked manually.
+    ui::success(format!(
+        "snapshot: {} → {}",
+        ui::short_hash(&sha),
+        ui::dim(&path.display().to_string())
+    ));
+    Ok(())
+}
+
+// ─── upload (manual MemWal upload) ──────────────────────────────────────────
+
+/// Push one or all local trace snapshots to MemWal. The trace JSON itself is
+/// uploaded as the memory `text` — the relayer handles embedding + Seal.
+///
+/// `namespace` defaults to the basename of the repo root, which is a stable
+/// per-repo bucket for the user's MemWal account.
+pub async fn upload(commit: Option<String>, namespace_override: Option<String>) -> Result<()> {
+    use crate::memwal::MemWalClient;
+
+    let git_dir = current_git_dir()?;
+
+    // Config: pull MemWal creds from global walgit config.
+    let cfg = crate::config::load()?;
+    let mw = cfg.memwal.as_ref().ok_or_else(|| {
+        WalGitError::other(
+            "[memwal] not configured — set account_id / relayer_url / delegate_key_path \
+             in ~/.walgit/config.toml",
+        )
+    })?;
+    let priv_bytes = mw.load_delegate_key()?;
+    let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
+
+    let namespace = namespace_override
+        .unwrap_or_else(|| default_namespace().unwrap_or_else(|| "default".into()));
+
+    let entries: Vec<(String, std::path::PathBuf)> = match commit {
+        Some(sha) => vec![(sha.clone(), trace_pending::trace_path(&git_dir, &sha))],
+        None => trace_pending::list_snapshots(&git_dir)?,
+    };
+    if entries.is_empty() {
+        ui::info("no local trace snapshots to upload");
         return Ok(());
     }
 
-    let (built, warnings) = pt.into_trace();
-    for w in warnings {
-        ui::warn(w);
-    }
-    if let Some(w) = built.soft_cap_warning() {
-        ui::warn(w);
+    ui::header(&format!("uploading {} trace(s) to MemWal", entries.len()));
+    ui::info(format!("namespace: {}", ui::highlight(&namespace)));
+    ui::info(format!("relayer:   {}", ui::dim(&client.account_id)));
+
+    let mut ok = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (sha, path) in entries {
+        if !path.exists() {
+            failed.push(format!("{} (file missing: {})", sha, path.display()));
+            continue;
+        }
+        let pt = trace_pending::load_snapshot(&path)?;
+        // Encode the structured trace as the memory text. We prepend a
+        // stable header so the relayer's embedding picks up the commit
+        // SHA, agent_id, and task — those are the signals semantic recall
+        // wants ("show me past traces touching X").
+        let text = format_for_memwal(&sha, &pt);
+        match client.remember(&text, Some(&namespace)).await {
+            Ok(resp) => {
+                ok += 1;
+                ui::success(format!(
+                    "{} job={} {}",
+                    ui::short_hash(&sha),
+                    resp.job_id.as_deref().unwrap_or("?"),
+                    ui::dim(&pt.task)
+                ));
+            }
+            Err(e) => {
+                failed.push(format!("{} ({})", sha, e));
+                ui::warn(format!("{} failed: {}", ui::short_hash(&sha), e));
+            }
+        }
     }
 
-    let new_message = trace::attach_to_message(&existing, &built)?;
-    std::fs::write(&message_file, &new_message)?;
-
-    // Move pending → last so the next commit doesn't double-stamp.
-    let _ = trace_pending::consume(&git_dir)?;
+    if !failed.is_empty() {
+        return Err(WalGitError::other(format!(
+            "{} of {} uploads failed",
+            failed.len(),
+            ok + failed.len()
+        )));
+    }
+    ui::success(format!("uploaded {} traces", ok));
     Ok(())
+}
+
+/// Pull semantic matches for `query` from the project's namespace.
+pub async fn recall(query: String, limit: u32, namespace_override: Option<String>) -> Result<()> {
+    use crate::memwal::MemWalClient;
+
+    let cfg = crate::config::load()?;
+    let mw = cfg.memwal.as_ref().ok_or_else(|| {
+        WalGitError::other("[memwal] not configured (see `walgit trace upload --help`)")
+    })?;
+    let priv_bytes = mw.load_delegate_key()?;
+    let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
+
+    let namespace = namespace_override
+        .unwrap_or_else(|| default_namespace().unwrap_or_else(|| "default".into()));
+    let resp = client.recall(&query, Some(limit), Some(&namespace)).await?;
+
+    ui::header(&format!("recall: \"{}\"", query));
+    if resp.results.is_empty() {
+        match resp.dropped_count.unwrap_or(0) {
+            0 => ui::info("no matches"),
+            n => ui::info(format!(
+                "no matches above similarity threshold ({} item(s) in namespace were too distant)",
+                n
+            )),
+        }
+        return Ok(());
+    }
+    for (i, m) in resp.results.iter().enumerate() {
+        let dist = m
+            .distance
+            .or(m.score)
+            .map(|d| format!("{:.3}", d))
+            .unwrap_or_else(|| "-".into());
+        println!("  {} {}", ui::dim(&format!("#{} dist={}", i + 1, dist)), "");
+        if let Some(t) = &m.text {
+            for line in t.lines().take(4) {
+                println!("    {}", line);
+            }
+            if t.lines().count() > 4 {
+                println!("    {}", ui::dim("…"));
+            }
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// Pack a snapshot into the textual form MemWal indexes. Kept stable so
+/// semantic recall over multiple commits stays consistent.
+fn format_for_memwal(commit_sha: &str, pt: &PendingTrace) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("commit: {}\n", commit_sha));
+    s.push_str(&format!("agent:  {}\n", pt.agent_id));
+    s.push_str(&format!("run:    {}\n", pt.run_id));
+    if let Some(p) = &pt.parent_run_id {
+        s.push_str(&format!("parent: {}\n", p));
+    }
+    s.push_str(&format!(
+        "task:   {}\n",
+        if pt.task.trim().is_empty() {
+            "(none)"
+        } else {
+            &pt.task
+        }
+    ));
+    s.push_str("\n");
+    if !pt.tools_called.is_empty() {
+        s.push_str("tools:\n");
+        for tc in &pt.tools_called {
+            s.push_str(&format!(
+                "  · {} {} → {}\n",
+                tc.name, tc.input_summary, tc.output_summary
+            ));
+        }
+        s.push_str("\n");
+    }
+    if !pt.decision.trim().is_empty() {
+        s.push_str("decision:\n");
+        s.push_str(&pt.decision);
+        s.push_str("\n");
+    }
+    if !pt.alternatives_considered.is_empty() {
+        s.push_str("\nalternatives:\n");
+        for a in &pt.alternatives_considered {
+            s.push_str(&format!("  ✗ {}\n", a));
+        }
+    }
+    s
+}
+
+/// Pick a stable MemWal namespace for the current repo.
+///
+/// Preference order:
+/// 1. **`LocalRepoConfig.id`** — the on-chain Sui repo object ID. Stable
+///    across machines and contributors; the right answer for any
+///    walgit-managed repo.
+/// 2. **Directory basename** — fallback when we're inside a plain git repo
+///    that isn't (yet) walgit-registered. Different contributors may pick
+///    different basenames, so memory won't merge across machines — but it's
+///    the best we can do without extra signal.
+fn default_namespace() -> Option<String> {
+    if let Ok((_, _, local)) = crate::commands::find_repo() {
+        if !local.id.is_empty() && local.id != "pending" {
+            return Some(local.id);
+        }
+    }
+    let root = current_repo_root().ok()?;
+    let dir = root.file_name()?.to_str()?.to_string();
+    Some(dir)
 }
 
 // ─── install / uninstall ────────────────────────────────────────────────────
@@ -1184,7 +1502,10 @@ mod tests {
     #[test]
     fn read_summary_uses_content_length() {
         let resp = json!({"file": {"content": "a\nb\nc\n"}});
-        assert_eq!(summarize_tool_output("Read", Some(&resp)), "3 lines, 6 bytes");
+        assert_eq!(
+            summarize_tool_output("Read", Some(&resp)),
+            "3 lines, 6 bytes"
+        );
     }
 
     #[test]

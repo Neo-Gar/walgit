@@ -27,6 +27,72 @@ pub struct Config {
     /// Output display preferences.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// MemWal credentials. Required only when reasoning traces are
+    /// activated for a repo (see `walgit trace install`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memwal: Option<MemWalConfig>,
+}
+
+/// User-wide MemWal account configuration. One account serves all walgit
+/// repos for this user, with the per-repo namespace separating their
+/// memory spaces.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MemWalConfig {
+    /// Sui object ID of the `MemWalAccount` we delegate from.
+    pub account_id: String,
+    /// HTTP base URL of the MemWal relayer (e.g. `https://relayer.staging.memwal.ai`).
+    pub relayer_url: String,
+    /// Either an inline hex-encoded Ed25519 private key…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate_key_hex: Option<String>,
+    /// …or a path to a file containing the hex (recommended for production).
+    /// The file must be 0600. Tilde-expanded at read time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate_key_path: Option<String>,
+}
+
+impl MemWalConfig {
+    /// Resolve the delegate private key bytes. Prefers an explicit path so
+    /// hex doesn't end up in `~/.walgit/config.toml` (which can be shared
+    /// during screen-shares, copied into bug reports, etc).
+    pub fn load_delegate_key(&self) -> Result<[u8; 32]> {
+        let hex_str = if let Some(p) = &self.delegate_key_path {
+            let path = expand_tilde(p);
+            std::fs::read_to_string(&path)
+                .map_err(|e| {
+                    WalGitError::config(format!(
+                        "cannot read MemWal delegate key from {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?
+                .trim()
+                .to_string()
+        } else if let Some(h) = &self.delegate_key_hex {
+            h.trim().to_string()
+        } else {
+            return Err(WalGitError::config(
+                "MemWal delegate key not configured — set memwal.delegate_key_path or memwal.delegate_key_hex",
+            ));
+        };
+        let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+            .map_err(|e| WalGitError::config(format!("MemWal delegate key is not hex: {}", e)))?;
+        bytes.try_into().map_err(|v: Vec<u8>| {
+            WalGitError::config(format!(
+                "MemWal delegate key must be 32 bytes, got {}",
+                v.len()
+            ))
+        })
+    }
+}
+
+fn expand_tilde(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(p)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -90,6 +156,7 @@ impl Default for Config {
             wallet_path: None,
             networks,
             display: DisplayConfig::default(),
+            memwal: None,
         }
     }
 }

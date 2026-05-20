@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod hooks;
+pub mod memwal;
 pub mod retry;
 pub mod seal;
 pub mod sui;

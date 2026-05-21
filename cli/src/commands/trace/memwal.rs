@@ -273,7 +273,7 @@ pub async fn recall(
                         );
                     } else if dropped > 0 {
                         ui::info(format!(
-                            "MemWal: {dropped} trace(s) below similarity threshold"
+                            "MemWal: {dropped} trace(s) found but could not be decrypted (SEAL error)"
                         ));
                     }
                     false
@@ -324,7 +324,7 @@ pub async fn recall(
     if hits.is_empty() {
         ui::info(format!("no local traces contain \"{}\"", query));
     } else {
-        println!("  {}", ui::dim("local search (MemWal unavailable):"));
+        println!("  {}", ui::dim("local search:"));
         println!();
         for (i, (sha, text)) in hits.iter().enumerate() {
             println!(

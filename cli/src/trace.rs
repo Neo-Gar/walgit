@@ -4,8 +4,6 @@
 //! Reasoning trace — structured JSON an agent attaches to a commit describing
 //! *what it did and why*. Stored inside the git commit message so it's part
 //! of the SHA (tamper-evident) and visible to every git-aware tool.
-//!
-//! See `.agents/TRACE_SCHEMA.md` for the schema spec.
 
 use crate::error::{Result, WalGitError};
 use serde::{Deserialize, Serialize};

@@ -285,6 +285,16 @@ async fn execute_move_call_once(
 /// form (rather than `sui_graphql::Client::execute_transaction`) so that
 /// `BAD_USER_INPUT` and other server-side errors propagate up with their
 /// actual messages instead of silently coming back as `effects: None`.
+///
+/// Sui GraphQL sometimes returns **both** `data.executeTransaction.effects.effectsBcs`
+/// AND a top-level `errors` entry when a Move transaction fails on-chain. We
+/// therefore fetch the raw response instead of routing through `graphql_query`,
+/// so we can:
+/// 1. Try to decode `effectsBcs` first — this gives us the precise Move abort
+///    code (e.g. `MoveAbort(walgit::walgit, 1001)`).
+/// 2. Fall back to the human-readable `errors[].extensions.executionError` string
+///    when effects are absent.
+/// 3. Only surface the generic GraphQL error message as a last resort.
 async fn execute_signed(
     graphql_url: &str,
     tx: &Transaction,
@@ -294,37 +304,60 @@ async fn execute_signed(
     let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
     let sig_b64 = signature.to_base64();
 
-    let data = graphql_query(
-        graphql_url,
-        r#"mutation($tx: Base64!, $sigs: [Base64!]!) {
+    let client = reqwest::Client::new();
+    let body = json!({
+        "query": r#"mutation($tx: Base64!, $sigs: [Base64!]!) {
           executeTransaction(transactionDataBcs: $tx, signatures: $sigs) {
             effects { effectsBcs }
           }
         }"#,
-        json!({ "tx": tx_b64, "sigs": [sig_b64] }),
-    )
-    .await?;
+        "variables": { "tx": tx_b64, "sigs": [sig_b64] }
+    });
+    let resp = client
+        .post(graphql_url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&body)?)
+        .send()
+        .await
+        .map_err(|e| WalGitError::sui_network(format!("graphql request failed: {}", e)))?;
 
-    let effects_b64 = data["executeTransaction"]["effects"]["effectsBcs"]
-        .as_str()
-        .ok_or_else(|| {
-            WalGitError::sui_transaction("executeTransaction returned no effectsBcs".to_string())
-        })?;
+    if !resp.status().is_success() {
+        return Err(WalGitError::sui_network(format!(
+            "graphql HTTP {}",
+            resp.status()
+        )));
+    }
+    let v: Value = resp.json().await?;
 
-    let effects_bytes = base64::engine::general_purpose::STANDARD
-        .decode(effects_b64)
-        .map_err(|e| WalGitError::sui_transaction(format!("decode effects b64: {}", e)))?;
-
-    let effects: TransactionEffects = bcs::from_bytes(&effects_bytes)
-        .map_err(|e| WalGitError::sui_transaction(format!("decode effects bcs: {}", e)))?;
-
-    // Surface on-chain failure (Move abort, gas exhaustion, etc.) as a clear error
-    // rather than as "no created objects".
-    if let Some(failure) = effects_failure(&effects) {
-        return Err(WalGitError::sui_transaction(failure));
+    // Try to decode effectsBcs first — even when top-level `errors` are present
+    // Sui often still returns the effects for on-chain failures. The BCS-decoded
+    // status gives us the most specific error (exact Move abort code + module).
+    if let Some(b64) = v["data"]["executeTransaction"]["effects"]["effectsBcs"].as_str() {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            if let Ok(effects) = bcs::from_bytes::<TransactionEffects>(&bytes) {
+                if let Some(failure) = effects_failure(&effects) {
+                    return Err(WalGitError::sui_transaction(failure));
+                }
+                return parse_exec_result(effects).await;
+            }
+        }
     }
 
-    parse_exec_result(effects).await
+    // No usable effectsBcs — surface whatever the errors array says.
+    if let Some(errs) = v["errors"].as_array() {
+        if !errs.is_empty() {
+            let msg = errs
+                .iter()
+                .map(format_graphql_error)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(WalGitError::sui_graphql(msg));
+        }
+    }
+
+    Err(WalGitError::sui_transaction(
+        "executeTransaction returned no effectsBcs and no errors".to_string(),
+    ))
 }
 
 fn effects_failure(effects: &TransactionEffects) -> Option<String> {
@@ -416,6 +449,15 @@ async fn graphql_query(url: &str, query: &str, variables: Value) -> Result<Value
 /// Format a GraphQL error including its `extensions` (code, details) so the
 /// real on-chain abort reason is visible instead of just a generic
 /// "Failed to execute transaction".
+///
+/// Sui GraphQL versions differ in where they put the execution failure detail:
+/// - `extensions.executionError` — plain string in older versions
+/// - `extensions.details` — may be a nested object in newer versions
+/// - `extensions.reason`, `extensions.error` — additional variants
+///
+/// We accept both string and object/array values (serialising the latter as
+/// compact JSON) and fall back to dumping all extensions when nothing specific
+/// is found, so callers always see more than just the HTTP-level code.
 fn format_graphql_error(e: &Value) -> String {
     let base = e["message"].as_str().unwrap_or("unknown");
     let mut parts = vec![base.to_string()];
@@ -424,13 +466,31 @@ fn format_graphql_error(e: &Value) -> String {
     if let Some(code) = ext["code"].as_str() {
         parts.push(format!("code={}", code));
     }
-    // Sui GraphQL puts the actual execution failure under various keys
-    // depending on version; surface anything that looks informative.
-    for key in ["details", "executionError", "reason", "error"] {
-        if let Some(s) = ext[key].as_str() {
+
+    let mut found_detail = false;
+    for key in ["executionError", "details", "reason", "error"] {
+        let v = &ext[key];
+        if v.is_null() {
+            continue;
+        }
+        let s = match v {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        if !s.is_empty() {
             parts.push(format!("{}={}", key, s));
+            found_detail = true;
         }
     }
+
+    // If no recognised detail field was present, dump the whole extensions
+    // object so the developer/user has raw signal to work with.
+    if !found_detail && !ext.is_null() && ext != &Value::Object(Default::default()) {
+        if let Ok(raw) = serde_json::to_string(ext) {
+            parts.push(format!("extensions={}", raw));
+        }
+    }
+
     parts.join(" · ")
 }
 

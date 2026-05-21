@@ -253,6 +253,7 @@ async fn main() -> Result<()> {
             epochs,
             short_ids,
             full_ids,
+            betterleaks,
             show,
         } => {
             let short_pref = if short_ids {
@@ -261,6 +262,17 @@ async fn main() -> Result<()> {
                 Some(false)
             } else {
                 None
+            };
+            let betterleaks_skip_pref = match betterleaks.as_deref() {
+                Some("disable") => Some(true),
+                Some("enable") => Some(false),
+                Some(other) => {
+                    return Err(anyhow::anyhow!(
+                        "--betterleaks: expected 'enable' or 'disable', got '{}'",
+                        other
+                    ));
+                }
+                None => None,
             };
             walgit::commands::config_cmd::run(
                 network,
@@ -271,6 +283,7 @@ async fn main() -> Result<()> {
                 aggregator_url,
                 epochs,
                 short_pref,
+                betterleaks_skip_pref,
                 show,
             )
             .await?

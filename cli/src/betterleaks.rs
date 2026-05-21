@@ -32,6 +32,17 @@ pub enum ScanOutcome {
     Unavailable,
 }
 
+// ─── Config gate ─────────────────────────────────────────────────────────────
+
+/// Return `true` when betterleaks is disabled via `[betterleaks] skip = true`
+/// in `~/.walgit/config.toml`. When skipped, ALL scans and warnings are
+/// suppressed — the caller should short-circuit before calling any other fn.
+pub fn is_skipped() -> bool {
+    crate::config::load()
+        .map(|c| c.betterleaks.skip)
+        .unwrap_or(false)
+}
+
 // ─── Availability check ───────────────────────────────────────────────────────
 
 /// Return `true` if the `betterleaks` binary is reachable on PATH.

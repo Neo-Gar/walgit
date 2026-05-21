@@ -91,13 +91,15 @@ pub async fn upload_for_push(
 
         let pt = trace_pending::load_snapshot(&path)?;
         let text = format_for_memwal(&sha, &pt);
-        if let crate::betterleaks::ScanOutcome::SecretsFound { output } =
-            crate::betterleaks::scan_text(&text)
-        {
-            return Err(WalGitError::other(format!(
-                "betterleaks: secrets detected in trace for {} — upload aborted\n{}",
-                sha, output
-            )));
+        if !crate::betterleaks::is_skipped() {
+            if let crate::betterleaks::ScanOutcome::SecretsFound { output } =
+                crate::betterleaks::scan_text(&text)
+            {
+                return Err(WalGitError::other(format!(
+                    "betterleaks: secrets detected in trace for {} — upload aborted\n{}",
+                    sha, output
+                )));
+            }
         }
         let job = client
             .remember(&text, Some(namespace))
@@ -189,7 +191,9 @@ pub async fn upload(commit: Option<String>, namespace_override: Option<String>) 
     ui::info(format!("relayer:   {}", ui::dim(&client.account_id)));
 
     // Gate: require betterleaks before any trace leaves the machine.
-    let scan_enabled = if !crate::betterleaks::is_available() {
+    let scan_enabled = if crate::betterleaks::is_skipped() {
+        false
+    } else if !crate::betterleaks::is_available() {
         if !crate::betterleaks::confirm_continue_without_scan() {
             return Err(WalGitError::other(
                 "upload aborted — install betterleaks and retry".to_string(),

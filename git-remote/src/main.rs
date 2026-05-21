@@ -524,21 +524,23 @@ async fn do_push(
     // ─── Betterleaks secret scan ──────────────────────────────────────────────
     // Run before any data leaves the machine. Hard-abort if secrets are found;
     // warn-and-continue if betterleaks is not installed.
-    match walgit::betterleaks::scan_git(repo_dir) {
-        walgit::betterleaks::ScanOutcome::SecretsFound { output } => {
-            bail!(
-                "betterleaks: secrets detected in repository — push aborted\n\
-                 Fix the issues below, then push again.\n\n{}",
-                output
-            );
-        }
-        walgit::betterleaks::ScanOutcome::Unavailable => {
-            if !walgit::betterleaks::confirm_continue_without_scan() {
-                bail!("push aborted — install betterleaks and retry");
+    if !walgit::betterleaks::is_skipped() {
+        match walgit::betterleaks::scan_git(repo_dir) {
+            walgit::betterleaks::ScanOutcome::SecretsFound { output } => {
+                bail!(
+                    "betterleaks: secrets detected in repository — push aborted\n\
+                     Fix the issues below, then push again.\n\n{}",
+                    output
+                );
             }
-        }
-        walgit::betterleaks::ScanOutcome::Clean => {
-            ui::einfo("betterleaks: no secrets detected");
+            walgit::betterleaks::ScanOutcome::Unavailable => {
+                if !walgit::betterleaks::confirm_continue_without_scan() {
+                    bail!("push aborted — install betterleaks and retry");
+                }
+            }
+            walgit::betterleaks::ScanOutcome::Clean => {
+                ui::einfo("betterleaks: no secrets detected");
+            }
         }
     }
 

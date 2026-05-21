@@ -40,12 +40,17 @@ pub async fn run(
     aggregator_url: Option<String>,
     epochs: Option<u32>,
     short_ids: Option<bool>,
+    betterleaks_skip: Option<bool>,
     show: bool,
 ) -> Result<()> {
     let mut cfg = load()?;
 
     if let Some(v) = short_ids {
         cfg.display.short_ids = v;
+    }
+
+    if let Some(v) = betterleaks_skip {
+        cfg.betterleaks.skip = v;
     }
 
     if let Some(net) = network {
@@ -102,7 +107,11 @@ pub async fn run(
         ui::success("config updated");
         let net = cfg.active_network()?;
         ui::header("active network");
-        println!("  {} {}", ui::label("network    "), ui::highlight(&cfg.network));
+        println!(
+            "  {} {}",
+            ui::label("network    "),
+            ui::highlight(&cfg.network)
+        );
         println!(
             "  {} {}",
             ui::label("package_id "),
@@ -120,8 +129,16 @@ pub async fn run(
                 .unwrap_or_else(|| ui::dim("(unset)"))
         );
         println!("  {} {}", ui::label("sui graphql"), net.sui.graphql_url);
-        println!("  {} {}", ui::label("walrus pub "), net.walrus.publisher_url);
-        println!("  {} {}", ui::label("walrus agg "), net.walrus.aggregator_url);
+        println!(
+            "  {} {}",
+            ui::label("walrus pub "),
+            net.walrus.publisher_url
+        );
+        println!(
+            "  {} {}",
+            ui::label("walrus agg "),
+            net.walrus.aggregator_url
+        );
         println!("  {} {}", ui::label("epochs     "), net.walrus.epochs);
         ui::header("display");
         println!(
@@ -131,6 +148,16 @@ pub async fn run(
                 ui::highlight("on")
             } else {
                 ui::dim("off (full IDs)")
+            }
+        );
+        ui::header("betterleaks");
+        println!(
+            "  {} {}",
+            ui::label("scanning   "),
+            if cfg.betterleaks.skip {
+                ui::dim("disabled (`walgit config --betterleaks enable` to restore) ")
+            } else {
+                ui::highlight("enabled")
             }
         );
     }

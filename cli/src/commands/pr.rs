@@ -143,23 +143,25 @@ pub async fn create(
 
     // ─── Betterleaks secret scan ──────────────────────────────────────────────
     // Scan the repository before the packfile reaches Walrus.
-    match crate::betterleaks::scan_git(&repo_dir) {
-        crate::betterleaks::ScanOutcome::SecretsFound { output } => {
-            return Err(WalGitError::other(format!(
-                "betterleaks: secrets detected — PR creation aborted\n\
-                 Fix the issues below, then try again.\n\n{}",
-                output
-            )));
-        }
-        crate::betterleaks::ScanOutcome::Unavailable => {
-            if !crate::betterleaks::confirm_continue_without_scan() {
-                return Err(WalGitError::other(
-                    "PR creation aborted — install betterleaks and retry".to_string(),
-                ));
+    if !crate::betterleaks::is_skipped() {
+        match crate::betterleaks::scan_git(&repo_dir) {
+            crate::betterleaks::ScanOutcome::SecretsFound { output } => {
+                return Err(WalGitError::other(format!(
+                    "betterleaks: secrets detected — PR creation aborted\n\
+                     Fix the issues below, then try again.\n\n{}",
+                    output
+                )));
             }
-        }
-        crate::betterleaks::ScanOutcome::Clean => {
-            ui::success("betterleaks: no secrets detected");
+            crate::betterleaks::ScanOutcome::Unavailable => {
+                if !crate::betterleaks::confirm_continue_without_scan() {
+                    return Err(WalGitError::other(
+                        "PR creation aborted — install betterleaks and retry".to_string(),
+                    ));
+                }
+            }
+            crate::betterleaks::ScanOutcome::Clean => {
+                ui::success("betterleaks: no secrets detected");
+            }
         }
     }
 

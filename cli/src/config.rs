@@ -31,6 +31,16 @@ pub struct Config {
     /// activated for a repo (see `walgit trace install`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memwal: Option<MemWalConfig>,
+    /// Betterleaks secret scanning settings.
+    #[serde(default)]
+    pub betterleaks: BetterleaksConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BetterleaksConfig {
+    /// When `true`, all betterleaks scans and warnings are suppressed.
+    #[serde(default)]
+    pub skip: bool,
 }
 
 /// User-wide MemWal account configuration. One account serves all walgit
@@ -162,6 +172,7 @@ impl Default for Config {
             networks,
             display: DisplayConfig::default(),
             memwal: None,
+            betterleaks: BetterleaksConfig::default(),
         }
     }
 }

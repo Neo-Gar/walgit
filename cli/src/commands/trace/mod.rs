@@ -268,35 +268,37 @@ pub async fn snapshot(commit_sha: Option<String>) -> Result<()> {
     // original prompt) and `decision`/`alternatives` before the snapshot is
     // written. Runs in a post-commit hook so we cannot show an interactive
     // prompt — we warn and refuse to save rather than blocking the commit.
-    let text = crate::commands::trace::format_for_memwal(&sha, &pt);
-    match crate::betterleaks::scan_text(&text) {
-        crate::betterleaks::ScanOutcome::SecretsFound { output } => {
-            // Print to stderr — the hook now lets stderr through.
-            eprintln!();
-            eprintln!("  ╔═══════════════════════════════════════════════════════════════╗");
-            eprintln!("  ║  ⚠  BETTERLEAKS: SECRETS DETECTED IN TRACE — NOT SAVED  ⚠   ║");
-            eprintln!("  ╠═══════════════════════════════════════════════════════════════╣");
-            eprintln!("  ║  The reasoning trace for this commit contains a secret.       ║");
-            eprintln!("  ║  The snapshot was NOT saved — the trace will not be uploaded  ║");
-            eprintln!("  ║  to MemWal. Run `walgit trace abort` to discard the trace.   ║");
-            eprintln!("  ╚═══════════════════════════════════════════════════════════════╝");
-            eprintln!();
-            for line in output.lines() {
-                eprintln!("  {}", line);
+    if !crate::betterleaks::is_skipped() {
+        let text = crate::commands::trace::format_for_memwal(&sha, &pt);
+        match crate::betterleaks::scan_text(&text) {
+            crate::betterleaks::ScanOutcome::SecretsFound { output } => {
+                // Print to stderr — the hook now lets stderr through.
+                eprintln!();
+                eprintln!("  ╔═══════════════════════════════════════════════════════════════╗");
+                eprintln!("  ║  ⚠  BETTERLEAKS: SECRETS DETECTED IN TRACE — NOT SAVED  ⚠   ║");
+                eprintln!("  ╠═══════════════════════════════════════════════════════════════╣");
+                eprintln!("  ║  The reasoning trace for this commit contains a secret.       ║");
+                eprintln!("  ║  The snapshot was NOT saved — the trace will not be uploaded  ║");
+                eprintln!("  ║  to MemWal. Run `walgit trace abort` to discard the trace.   ║");
+                eprintln!("  ╚═══════════════════════════════════════════════════════════════╝");
+                eprintln!();
+                for line in output.lines() {
+                    eprintln!("  {}", line);
+                }
+                eprintln!();
+                // Return Ok so the commit itself is not rolled back.
+                return Ok(());
             }
-            eprintln!();
-            // Return Ok so the commit itself is not rolled back.
-            return Ok(());
+            crate::betterleaks::ScanOutcome::Unavailable => {
+                // Non-interactive context: warn but save anyway.
+                // The push-time gate will ask for confirmation before MemWal upload.
+                eprintln!(
+                    "  ! betterleaks not installed — trace saved without secret scan \
+                     (secrets will be checked again at push time)"
+                );
+            }
+            crate::betterleaks::ScanOutcome::Clean => {}
         }
-        crate::betterleaks::ScanOutcome::Unavailable => {
-            // Non-interactive context: warn but save anyway.
-            // The push-time gate will ask for confirmation before MemWal upload.
-            eprintln!(
-                "  ! betterleaks not installed — trace saved without secret scan \
-                 (secrets will be checked again at push time)"
-            );
-        }
-        crate::betterleaks::ScanOutcome::Clean => {}
     }
 
     let path = trace_pending::save_snapshot(&git_dir, &sha, &pt)?;

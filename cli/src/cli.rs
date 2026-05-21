@@ -116,6 +116,9 @@ pub enum Command {
         /// Render full Sui object IDs everywhere (default).
         #[arg(long, conflicts_with = "short_ids")]
         full_ids: bool,
+        /// Enable or disable betterleaks secret scanning. Values: enable, disable.
+        #[arg(long, value_name = "enable|disable")]
+        betterleaks: Option<String>,
         #[arg(long)]
         show: bool,
     },

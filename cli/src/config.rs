@@ -69,6 +69,11 @@ impl MemWalConfig {
                 .trim()
                 .to_string()
         } else if let Some(h) = &self.delegate_key_hex {
+            eprintln!(
+                "walgit warning: memwal.delegate_key_hex is set in ~/.walgit/config.toml. \
+                 This file may be shared in screen-shares or bug reports. \
+                 Migrate to memwal.delegate_key_path pointing to a 0600 file."
+            );
             h.trim().to_string()
         } else {
             return Err(WalGitError::config(
@@ -289,6 +294,15 @@ pub fn save(config: &Config) -> Result<()> {
     let path = config_path()?;
     let content = toml::to_string_pretty(config)?;
     std::fs::write(&path, content)?;
+    // Restrict permissions so the file (which may contain delegate_key_hex)
+    // is not world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms)?;
+    }
     Ok(())
 }
 

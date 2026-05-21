@@ -5,6 +5,31 @@ use crate::config::{load, save};
 use crate::error::{Result, WalGitError};
 use crate::ui;
 
+/// Validate a URL supplied via `walgit config --*-url`. Warns when plain HTTP
+/// is used outside localhost (SSRF risk; delegate key exposed in transit).
+fn validate_url(url: &str, flag: &str) -> Result<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(WalGitError::config(format!(
+            "{} must start with http:// or https://",
+            flag
+        )));
+    }
+    if url.starts_with("http://") {
+        let is_local = url.starts_with("http://localhost")
+            || url.starts_with("http://127.0.0.1")
+            || url.starts_with("http://[::1]");
+        if !is_local {
+            eprintln!(
+                "walgit warning: {} '{}' uses plain HTTP. \
+                 Credentials and data will be sent unencrypted. \
+                 Use HTTPS for production deployments.",
+                flag, url
+            );
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     network: Option<String>,
@@ -52,12 +77,15 @@ pub async fn run(
             net.registry_id = Some(r);
         }
         if let Some(g) = graphql_url {
+            validate_url(&g, "--graphql-url")?;
             net.sui.graphql_url = g;
         }
         if let Some(u) = publisher_url {
+            validate_url(&u, "--publisher-url")?;
             net.walrus.publisher_url = u;
         }
         if let Some(u) = aggregator_url {
+            validate_url(&u, "--aggregator-url")?;
             net.walrus.aggregator_url = u;
         }
         if let Some(e) = epochs {

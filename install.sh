@@ -17,6 +17,7 @@ REPO="Neo-Gar/walgit"
 VERSION="${WALGIT_VERSION:-latest}"
 PREFIX="${WALGIT_PREFIX:-$HOME/.local/bin}"
 NETWORK="${WALGIT_NETWORK:-testnet}"
+SKIP_BETTERLEAKS="${WALGIT_SKIP_BETTERLEAKS:-0}"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -111,6 +112,41 @@ case ":$PATH:" in
      printf '       export PATH="%s:$PATH"\n' "$PREFIX" ;;
 esac
 
+# ---- betterleaks (secret scanning) -----------------------------------------
+if [ "$SKIP_BETTERLEAKS" = "1" ]; then
+  info "Skipping betterleaks install (WALGIT_SKIP_BETTERLEAKS=1)"
+elif command -v betterleaks >/dev/null 2>&1; then
+  info "betterleaks already installed: $(betterleaks --version 2>/dev/null | head -n1)"
+else
+  info "Installing betterleaks (secret scanner)..."
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        brew install betterleaks \
+          || warn "brew install betterleaks failed; install it manually: https://github.com/betterleaks/betterleaks"
+      else
+        warn "Homebrew not found. Install betterleaks manually:"
+        warn "  brew install betterleaks"
+        warn "  or: go install github.com/betterleaks/betterleaks@latest"
+      fi
+      ;;
+    Linux)
+      if command -v go >/dev/null 2>&1; then
+        go install github.com/betterleaks/betterleaks@latest \
+          || warn "go install betterleaks failed; install it manually: https://github.com/betterleaks/betterleaks"
+      else
+        warn "Go not found. Install betterleaks manually:"
+        warn "  go install github.com/betterleaks/betterleaks@latest"
+        warn "  or use Docker: docker run --rm -v \$(pwd):/repo ghcr.io/betterleaks/betterleaks:latest git /repo"
+      fi
+      ;;
+    *)
+      warn "Unsupported OS for automatic betterleaks install."
+      warn "See: https://github.com/betterleaks/betterleaks"
+      ;;
+  esac
+fi
+
 # ---- sui via suiup ----------------------------------------------------------
 if [ "${WALGIT_SKIP_SUI:-0}" = "1" ]; then
   info "Skipping sui install (WALGIT_SKIP_SUI=1)"
@@ -146,6 +182,10 @@ Binaries:
   $PREFIX/walgit
   $PREFIX/git-remote-walgit   (registers walgit:// URLs for git)
   $PREFIX/walgit-mcp          (MCP server)
+
+Security:
+  betterleaks scans for secrets before every push, PR, and MemWal upload.
+  $(command -v betterleaks >/dev/null 2>&1 && echo "betterleaks: installed" || echo "betterleaks: not found — scans will be skipped (WALGIT_SKIP_BETTERLEAKS=1 to silence)")
 
 Next steps:
   walgit --help

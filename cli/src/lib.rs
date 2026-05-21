@@ -4,6 +4,7 @@
 //! WalGit core library: shared by the `walgit` CLI binary and the
 //! `git-remote-walgit` helper.
 
+pub mod betterleaks;
 pub mod cli;
 pub mod commands;
 pub mod config;

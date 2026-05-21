@@ -186,7 +186,9 @@ public fun approve_pull_request(
     assert!(pr.repo_id == object::id(repo), EWrongRepo);
     assert!(object::id(acl) == get_acl_id(repo), EAclMismatch);
     assert!(get_acl_repo_id(acl) == pr.repo_id, EAclMismatch);
-    assert!(pr.status == STATUS_OPEN, EAlreadyMerged);
+    // Separate checks so the caller receives the correct error code.
+    assert!(pr.status != STATUS_MERGED, EAlreadyMerged);
+    assert!(pr.status != STATUS_CLOSED, EAlreadyClosed);
 
     let sender = ctx.sender();
     assert!(
@@ -224,7 +226,8 @@ public fun merge_pull_request(
 ) {
     assert!(pr.repo_id == object::id(repo), EWrongRepo);
     assert!(object::id(acl) == get_acl_id(repo), EAclMismatch);
-    assert!(pr.status == STATUS_OPEN, EAlreadyMerged);
+    assert!(pr.status != STATUS_MERGED, EAlreadyMerged);
+    assert!(pr.status != STATUS_CLOSED, EAlreadyClosed);
     assert!(pr.approved, ENotApproved);
 
     let sender = ctx.sender();
@@ -260,7 +263,8 @@ public fun close_pull_request(
 ) {
     assert!(pr.repo_id == object::id(repo), EWrongRepo);
     assert!(object::id(acl) == get_acl_id(repo), EAclMismatch);
-    assert!(pr.status == STATUS_OPEN, EAlreadyClosed);
+    assert!(pr.status != STATUS_MERGED, EAlreadyMerged);
+    assert!(pr.status != STATUS_CLOSED, EAlreadyClosed);
 
     let sender = ctx.sender();
     assert!(

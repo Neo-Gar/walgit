@@ -327,7 +327,7 @@ pub struct CommitInfo {
 pub fn get_commit_info(repo_path: &Path, commit_hash: &str) -> Result<CommitInfo> {
     let out = run(
         Command::new("git")
-            .args(["log", "-1", "--format=%s|%an|%ae|%at", commit_hash])
+            .args(["log", "-1", "--format=%s|%an|%ae|%at", "--end-of-options", commit_hash])
             .current_dir(repo_path),
         "git log",
     )?;
@@ -536,7 +536,7 @@ pub fn checkout(repo_path: &Path, commit_hash: &str) -> Result<()> {
     std::fs::write(&head_path, format!("{}\n", commit_hash))?;
     let out = run(
         Command::new("git")
-            .args(["checkout", "-f", commit_hash])
+            .args(["checkout", "-f", "--end-of-options", commit_hash])
             .current_dir(repo_path),
         "git checkout",
     )?;
@@ -589,7 +589,7 @@ pub fn find_foreign_tip(repo_path: &Path, target_branch: &str) -> Result<String>
 pub fn merge_fast_forward(repo_path: &Path, target_branch: &str, source_sha: &str) -> Result<()> {
     let out = run(
         Command::new("git")
-            .args(["checkout", target_branch])
+            .args(["checkout", "--end-of-options", target_branch])
             .current_dir(repo_path),
         "git checkout",
     )?;
@@ -597,7 +597,7 @@ pub fn merge_fast_forward(repo_path: &Path, target_branch: &str, source_sha: &st
 
     let out = run(
         Command::new("git")
-            .args(["merge", "--ff-only", source_sha])
+            .args(["merge", "--ff-only", "--end-of-options", source_sha])
             .current_dir(repo_path),
         "git merge",
     )?;

@@ -11,6 +11,7 @@
 ///   Commit        — shared object; holds Walrus blob_id + git HEAD SHA.
 module walgit::walgit;
 
+use std::bcs;
 use std::string::String;
 use sui::clock::Clock;
 use sui::event;
@@ -24,6 +25,8 @@ const ESelfFork: u64 = 2;
 const EAlreadyForked: u64 = 3;
 const EAclMismatch: u64 = 4;
 const ENameTaken: u64 = 5;
+const EPackageMismatch: u64 = 6;
+const ECounterOverflow: u64 = 7;
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 
@@ -186,8 +189,14 @@ fun bytes_slice(v: &vector<u8>, start: u64, end: u64): vector<u8> {
 /// Security: verifies that `acl` is actually bound to the repository
 /// identified by `id`, preventing cross-repo key extraction by users who
 /// hold read access to a different repository in the same package.
+/// Also verifies that the first 32 bytes match THIS package's address so a
+/// crafted identity from a different deployment cannot extract our keys.
 entry fun seal_approve(id: vector<u8>, acl: &AccessControl, ctx: &TxContext) {
     assert!(vector::length(&id) == 64, ENoAccess);
+    // First 32 bytes must match this package's on-chain address.
+    let pkg_bytes = bcs::to_bytes(&@walgit);
+    let id_pkg_bytes = bytes_slice(&id, 0, 32);
+    assert!(id_pkg_bytes == pkg_bytes, EPackageMismatch);
     let repo_id_bytes = bytes_slice(&id, 32, 64);
     assert!(repo_id_bytes == object::id_to_bytes(&acl.repo_id), ENoAccess);
 
@@ -508,6 +517,7 @@ public fun revoke_write_access(acl: &mut AccessControl, writer: address, ctx: &T
 /// Called by `pull_request::create_pull_request` so the counter lives
 /// in a single place and stays monotonic across concurrent creates.
 public(package) fun next_pr_number(repo: &mut Repository): u64 {
+    assert!(repo.next_pr_number < 18446744073709551615, ECounterOverflow);
     let n = repo.next_pr_number;
     repo.next_pr_number = n + 1;
     n

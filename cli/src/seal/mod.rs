@@ -101,7 +101,7 @@ impl SealClient {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let msg = signed_message(package_id.to_string(), &session_pk, creation_time_ms, 30);
+        let msg = signed_message(package_id.to_string(), &session_pk, creation_time_ms, 5);
         let kp = load_keypair(active_address, wallet_path)?;
         let user_sig = sign_personal_message(&kp, msg.as_bytes())?;
 
@@ -109,7 +109,7 @@ impl SealClient {
             user: parse_address(active_address)?,
             session_vk: session_pk.clone(),
             creation_time: creation_time_ms,
-            ttl_min: 30,
+            ttl_min: 5,
             signature: user_sig,
             mvr_name: None,
         };

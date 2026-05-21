@@ -4,7 +4,7 @@
 use crate::commands::{CommandContext, find_repo, require_registered};
 use crate::error::{Result, WalGitError};
 use crate::sui::types::PullRequestRecord;
-use crate::{git, ui};
+use crate::{git, ui, validate};
 use chrono::{DateTime, Utc};
 use console::style;
 
@@ -69,6 +69,7 @@ pub async fn create(
         Some(s) => s,
         None => current_branch(&repo_dir)?,
     };
+    validate::branch_name(&source_branch)?;
     let source_tip = git::rev_parse(&repo_dir, &source_branch)?;
 
     // ─── Resolve target branch (default = main / sole branch on target) ───────
@@ -76,6 +77,7 @@ pub async fn create(
         Some(t) => t,
         None => default_target_branch(&target_branches),
     };
+    validate::branch_name(&target_branch)?;
 
     // ─── Compute exclude tips: every commit known to the TARGET ───────────────
     // We pack only objects not reachable from any of these — so the PR blob
@@ -137,6 +139,28 @@ pub async fn create(
             ui::fmt_bytes(pack.len()),
             exclude_tips.len()
         ));
+    }
+
+    // ─── Betterleaks secret scan ──────────────────────────────────────────────
+    // Scan the repository before the packfile reaches Walrus.
+    match crate::betterleaks::scan_git(&repo_dir) {
+        crate::betterleaks::ScanOutcome::SecretsFound { output } => {
+            return Err(WalGitError::other(format!(
+                "betterleaks: secrets detected — PR creation aborted\n\
+                 Fix the issues below, then try again.\n\n{}",
+                output
+            )));
+        }
+        crate::betterleaks::ScanOutcome::Unavailable => {
+            if !crate::betterleaks::confirm_continue_without_scan() {
+                return Err(WalGitError::other(
+                    "PR creation aborted — install betterleaks and retry".to_string(),
+                ));
+            }
+        }
+        crate::betterleaks::ScanOutcome::Clean => {
+            ui::success("betterleaks: no secrets detected");
+        }
     }
 
     if !yes {

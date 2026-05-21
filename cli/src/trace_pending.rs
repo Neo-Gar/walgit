@@ -163,8 +163,28 @@ pub fn trace_path(git_dir: &Path, commit_sha: &str) -> PathBuf {
     traces_dir(git_dir).join(format!("{}.json", commit_sha))
 }
 
+/// Assert that `sha` is safe to use as a filesystem path component.
+/// Rejects path-traversal via `--commit ../../evil` before touching the disk.
+fn validate_sha(sha: &str) -> Result<()> {
+    if sha.len() < 7 || sha.len() > 64 {
+        return Err(WalGitError::other(format!(
+            "commit SHA '{}' must be 7–64 characters (got {})",
+            sha,
+            sha.len()
+        )));
+    }
+    if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(WalGitError::other(format!(
+            "commit SHA '{}' contains non-hex characters — expected a git SHA",
+            sha
+        )));
+    }
+    Ok(())
+}
+
 /// Persist `pt` as `traces/<commit_sha>.json`. Atomic; creates dirs on demand.
 pub fn save_snapshot(git_dir: &Path, commit_sha: &str, pt: &PendingTrace) -> Result<PathBuf> {
+    validate_sha(commit_sha)?;
     let dir = traces_dir(git_dir);
     std::fs::create_dir_all(&dir)?;
     let final_path = trace_path(git_dir, commit_sha);

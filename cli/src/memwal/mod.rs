@@ -19,6 +19,23 @@
 //! `MemWalAccount.delegate_keys` on Sui, so the caller doesn't pass the
 //! account ID on every request — it's part of the keypair's identity.
 //!
+//! # SECURITY — x-delegate-key (trusted-relayer model)
+//!
+//! `POST /api/recall` carries an additional `x-delegate-key` header containing
+//! the 32-byte Ed25519 **private** key (hex-encoded). The relayer's SEAL sidecar
+//! uses it to build a `SessionKey`, which the SEAL key servers accept because the
+//! corresponding public key is registered as a delegate in the Move contract.
+//!
+//! This is an intentional **trusted-relayer** design: the relayer sees the
+//! private key and can sign arbitrary MemWal requests on behalf of this user.
+//! The security properties that follow:
+//!
+//! - TLS is **mandatory** for production use. A plain-HTTP relayer URL exposes
+//!   the key in transit; [`MemWalClient::new`] emits a warning when this is detected.
+//! - A compromised relayer can impersonate the delegate until the key is rotated
+//!   via `walgit memwal add-delegate` + `walgit memwal remove-delegate`.
+//! - The delegate key is separate from the Sui wallet key, limiting blast radius.
+//!
 //! Two write modes:
 //!
 //! - [`MemWalClient::remember`] (regular) — POST `text + namespace`; relayer
@@ -64,10 +81,18 @@ pub struct MemWalClient {
 
 impl MemWalClient {
     pub fn new(base_url: String, account_id: String, delegate_key_bytes: [u8; 32]) -> Self {
+        let trimmed = base_url.trim_end_matches('/').to_string();
+        // x-delegate-key carries the raw private key — TLS is required.
+        if trimmed.starts_with("http://") && !is_localhost_url(&trimmed) {
+            eprintln!(
+                "walgit warning: MemWal relayer URL '{}' uses plain HTTP. \
+                 The delegate key will be sent unencrypted. Switch to HTTPS for production.",
+                trimmed
+            );
+        }
         let delegate_key = ed25519_dalek::SigningKey::from_bytes(&delegate_key_bytes);
         Self {
-            // Trim trailing slash so we can blindly append `/api/...`.
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: trimmed,
             delegate_key,
             account_id,
             http: Client::new(),
@@ -90,11 +115,11 @@ impl MemWalClient {
         if !status.is_success() {
             return Err(WalGitError::other(format!(
                 "MemWal /health returned {}: {}",
-                status, body
+                status, truncate_body(&body)
             )));
         }
         serde_json::from_str(&body).map_err(|e| {
-            WalGitError::other(format!("MemWal /health: malformed JSON ({}): {}", e, body))
+            WalGitError::other(format!("MemWal /health: malformed JSON ({}): {}", e, truncate_body(&body)))
         })
     }
 
@@ -166,7 +191,7 @@ impl MemWalClient {
         if !status.is_success() {
             return Err(WalGitError::other(format!(
                 "MemWal GET {} returned {}: {}",
-                path, status, text
+                path, status, truncate_body(&text)
             )));
         }
         Ok(text)
@@ -216,13 +241,13 @@ impl MemWalClient {
         if !status.is_success() {
             return Err(WalGitError::other(format!(
                 "MemWal POST {} returned {}: {}",
-                path, status, text
+                path, status, truncate_body(&text)
             )));
         }
         serde_json::from_str(&text).map_err(|e| {
             WalGitError::other(format!(
                 "MemWal POST {}: malformed JSON ({}): {}",
-                path, e, text
+                path, e, truncate_body(&text)
             ))
         })
     }
@@ -276,13 +301,13 @@ impl MemWalClient {
         if !status.is_success() {
             return Err(WalGitError::other(format!(
                 "MemWal POST {} returned {}: {}",
-                path, status, text
+                path, status, truncate_body(&text)
             )));
         }
         serde_json::from_str(&text).map_err(|e| {
             WalGitError::other(format!(
                 "MemWal POST {}: malformed JSON ({}): {}",
-                path, e, text
+                path, e, truncate_body(&text)
             ))
         })
     }
@@ -290,6 +315,30 @@ impl MemWalClient {
 
 fn http_err(e: reqwest::Error) -> WalGitError {
     WalGitError::other(format!("MemWal HTTP error: {}", e))
+}
+
+/// Cap response bodies in error messages so long JSON blobs (or reflected
+/// authentication context) don't leak into logs or CI output.
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 500;
+    if body.len() <= MAX {
+        return body.to_string();
+    }
+    // Walk char boundaries so we never slice inside a multi-byte codepoint.
+    let safe_end = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i < MAX)
+        .last()
+        .unwrap_or(MAX);
+    format!("{}…[truncated]", &body[..safe_end])
+}
+
+/// True when `url` points at localhost — plain HTTP is acceptable there.
+fn is_localhost_url(url: &str) -> bool {
+    url.starts_with("http://localhost")
+        || url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://[::1]")
 }
 
 #[derive(Debug, Serialize)]
@@ -372,17 +421,17 @@ pub struct RecallMatch {
 mod tests {
     use super::*;
 
-    const TEST_PRIVKEY_HEX: &str =
-        "95e0c3184caac9377b2b5f958d41c2e3fea636f837d6e2b72fdc674404af7a1b";
-    const TEST_PUBKEY_HEX: &str =
-        "5b067f97395e1f310ba8fe2950da8320eacc046a17db8f7cfd536b7e3ca56bc5";
-
     #[test]
     fn public_key_matches_delegate_pair() {
-        // Sanity-check the well-known testnet pair the user gave us so we
-        // notice immediately if ed25519-dalek's API changes shape.
-        let priv_bytes: [u8; 32] = hex::decode(TEST_PRIVKEY_HEX).unwrap().try_into().unwrap();
-        let c = MemWalClient::new("http://example.invalid".into(), "0xtest".into(), priv_bytes);
-        assert_eq!(c.public_key_hex(), TEST_PUBKEY_HEX);
+        // Verify that public_key_hex() returns the verifying key that matches
+        // the signing key passed to new(). Uses a fresh ephemeral key so no
+        // private key is hardcoded in the source tree.
+        let mut rng = rand::thread_rng();
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+        let priv_bytes = key.to_bytes();
+        let expected_pub = hex::encode(key.verifying_key().to_bytes());
+        // Use https to match production requirements (avoids the HTTP warning).
+        let c = MemWalClient::new("https://example.invalid".into(), "0xtest".into(), priv_bytes);
+        assert_eq!(c.public_key_hex(), expected_pub);
     }
 }

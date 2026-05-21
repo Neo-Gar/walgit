@@ -31,7 +31,16 @@ pub const SHELL_END: &str = "# <<< walgit-trace END <<<";
 /// Sentinel string embedded in the `command` field of each managed Claude Code
 /// hook entry. The user's own entries never contain this substring, so we can
 /// identify ours unambiguously when re-installing or uninstalling.
-pub const CLAUDE_HOOK_TAG: &str = "walgit-trace-managed";
+///
+/// The leading/trailing underscores make accidental matches with user-authored
+/// commands extremely unlikely (an earlier bare `"walgit-trace-managed"` was
+/// more guessable). We keep the legacy constant so `uninstall` still removes
+/// hooks written by older walgit versions.
+pub const CLAUDE_HOOK_TAG: &str = "_walgit_trace_managed_v1_";
+
+/// Legacy sentinel used by walgit versions before the v1 tag was introduced.
+/// Checked during detection/removal so old installs can be cleanly uninstalled.
+pub const CLAUDE_HOOK_TAG_LEGACY: &str = "walgit-trace-managed";
 
 // ─── Git hooks ──────────────────────────────────────────────────────────────
 
@@ -52,7 +61,7 @@ fn post_commit_body() -> String {
 # Snapshots the pending reasoning trace (if any) into <git-dir>/walgit/traces/<sha>.json.
 # Exits 0 silently when there's no pending trace, so plain `git commit` keeps working.
 if command -v walgit >/dev/null 2>&1; then
-    walgit trace snapshot >/dev/null 2>&1 || true
+    walgit trace snapshot >/dev/null || true
 fi
 {end}
 "#,
@@ -282,7 +291,7 @@ pub fn unmerge_claude_settings(existing: Value) -> Value {
 }
 
 /// True if any of the `hooks[*].command` strings inside this entry contains
-/// our tag. Used to recognise entries we wrote previously.
+/// our tag (current or legacy). Used to recognise entries we wrote previously.
 fn entry_is_managed(entry: &Value) -> bool {
     let Some(arr) = entry.get("hooks").and_then(Value::as_array) else {
         return false;
@@ -290,7 +299,7 @@ fn entry_is_managed(entry: &Value) -> bool {
     arr.iter().any(|h| {
         h.get("command")
             .and_then(Value::as_str)
-            .map(|c| c.contains(CLAUDE_HOOK_TAG))
+            .map(|c| c.contains(CLAUDE_HOOK_TAG) || c.contains(CLAUDE_HOOK_TAG_LEGACY))
             .unwrap_or(false)
     })
 }
@@ -316,7 +325,7 @@ pub fn is_claude_installed(settings_path: &Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(settings_path) else {
         return false;
     };
-    raw.contains(CLAUDE_HOOK_TAG)
+    raw.contains(CLAUDE_HOOK_TAG) || raw.contains(CLAUDE_HOOK_TAG_LEGACY)
 }
 
 pub fn uninstall_claude_settings(settings_path: &Path) -> Result<bool> {

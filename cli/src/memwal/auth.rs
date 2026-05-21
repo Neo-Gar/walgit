@@ -61,13 +61,9 @@ mod tests {
 
     #[test]
     fn signed_payload_verifies() {
-        let bytes: [u8; 32] = hex::decode(
-            "95e0c3184caac9377b2b5f958d41c2e3fea636f837d6e2b72fdc674404af7a1b",
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-        let key = SigningKey::from_bytes(&bytes);
+        // Use an ephemeral key — no private key material hardcoded in source.
+        let mut rng = rand::thread_rng();
+        let key = SigningKey::generate(&mut rng);
 
         let ts = "1700000000";
         let nonce = "550e8400-e29b-41d4-a716-446655440000";

@@ -521,6 +521,27 @@ async fn do_push(
         walgit::ui::fmt_bytes(raw_pack.len())
     ));
 
+    // ─── Betterleaks secret scan ──────────────────────────────────────────────
+    // Run before any data leaves the machine. Hard-abort if secrets are found;
+    // warn-and-continue if betterleaks is not installed.
+    match walgit::betterleaks::scan_git(repo_dir) {
+        walgit::betterleaks::ScanOutcome::SecretsFound { output } => {
+            bail!(
+                "betterleaks: secrets detected in repository — push aborted\n\
+                 Fix the issues below, then push again.\n\n{}",
+                output
+            );
+        }
+        walgit::betterleaks::ScanOutcome::Unavailable => {
+            if !walgit::betterleaks::confirm_continue_without_scan() {
+                bail!("push aborted — install betterleaks and retry");
+            }
+        }
+        walgit::betterleaks::ScanOutcome::Clean => {
+            ui::einfo("betterleaks: no secrets detected");
+        }
+    }
+
     // ─── MemWal trace upload (only when traces are activated for this repo) ──
     // Done BEFORE the Walrus blob upload + Sui commit so a relayer outage
     // aborts the push without wasting storage/gas fees. No-op if the repo

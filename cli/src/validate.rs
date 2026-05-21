@@ -75,6 +75,90 @@ pub fn sui_object_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Git branch and refnames passed to git subprocesses or stored on-chain.
+/// Rejects values that could be parsed as flags or enable path traversal.
+///
+/// Rules:
+/// - 1..=200 characters
+/// - Must not start with `-` (would look like a git flag)
+/// - Must not start with `.` (relative path component)
+/// - Must not contain `..` (path traversal)
+/// - Must not contain control characters, NUL, space, `~`, `^`, `:`, `?`,
+///   `*`, `[`, or `\` (disallowed by git's refname spec)
+/// - Must not end with `.lock` (git lock files)
+/// - Must not be the bare `@` (git HEAD shorthand)
+pub fn branch_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(WalGitError::other("branch name is empty".to_string()));
+    }
+    if name.len() > 200 {
+        return Err(WalGitError::other(format!(
+            "branch name too long ({} > 200 chars)",
+            name.len()
+        )));
+    }
+    if name == "@" {
+        return Err(WalGitError::other(
+            "branch name '@' is reserved by git".to_string(),
+        ));
+    }
+    if name.starts_with('-') {
+        return Err(WalGitError::other(format!(
+            "branch name '{}' may not start with '-' (would be parsed as a flag)",
+            name
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(WalGitError::other(format!(
+            "branch name '{}' may not start with '.'",
+            name
+        )));
+    }
+    if name.contains("..") {
+        return Err(WalGitError::other(format!(
+            "branch name '{}' contains '..' (path traversal)",
+            name
+        )));
+    }
+    if name.ends_with(".lock") {
+        return Err(WalGitError::other(format!(
+            "branch name '{}' ends with '.lock' (reserved by git)",
+            name
+        )));
+    }
+    const FORBIDDEN: &[char] = &[
+        '\0', ' ', '\t', '\n', '\r', '~', '^', ':', '?', '*', '[', '\\',
+    ];
+    for c in name.chars() {
+        if (c as u32) < 32 || FORBIDDEN.contains(&c) {
+            return Err(WalGitError::other(format!(
+                "branch name '{}' contains forbidden character '{}'",
+                name, c
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Git commit SHAs (short or full) used as filesystem path components and
+/// git argument values. Allows only hex characters, 7–64 chars.
+pub fn git_sha(sha: &str) -> Result<()> {
+    if sha.len() < 7 || sha.len() > 64 {
+        return Err(WalGitError::other(format!(
+            "commit SHA '{}' must be 7–64 characters (got {})",
+            sha,
+            sha.len()
+        )));
+    }
+    if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(WalGitError::other(format!(
+            "commit SHA '{}' contains non-hex characters",
+            sha
+        )));
+    }
+    Ok(())
+}
+
 /// Owner addresses parsed from `walgit://<owner>/<repo>` URLs. Stricter than
 /// `sui_object_id`: must be exactly 64 hex chars (with or without `0x`) so we
 /// don't accept fragments that might glob into something else later.
@@ -149,5 +233,58 @@ mod tests {
         assert!(sui_address("0xabc").is_err());
         let too_long = format!("0x{}", "a".repeat(65));
         assert!(sui_address(&too_long).is_err());
+    }
+
+    #[test]
+    fn branch_name_accepts_normal() {
+        assert!(branch_name("main").is_ok());
+        assert!(branch_name("feature/my-branch").is_ok());
+        assert!(branch_name("fix-123").is_ok());
+        assert!(branch_name("v1.2.3").is_ok());
+    }
+
+    #[test]
+    fn branch_name_rejects_flag_lookalike() {
+        assert!(branch_name("-x").is_err());
+        assert!(branch_name("--evil").is_err());
+    }
+
+    #[test]
+    fn branch_name_rejects_traversal() {
+        assert!(branch_name("..").is_err());
+        assert!(branch_name("a/../b").is_err());
+    }
+
+    #[test]
+    fn branch_name_rejects_forbidden_chars() {
+        assert!(branch_name("a b").is_err());
+        assert!(branch_name("a~b").is_err());
+        assert!(branch_name("a^b").is_err());
+        assert!(branch_name("a:b").is_err());
+        assert!(branch_name("a*b").is_err());
+        assert!(branch_name("a[b").is_err());
+        assert!(branch_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn branch_name_rejects_reserved() {
+        assert!(branch_name("@").is_err());
+        assert!(branch_name(".hidden").is_err());
+        assert!(branch_name("locked.lock").is_err());
+    }
+
+    #[test]
+    fn git_sha_accepts_valid() {
+        assert!(git_sha("abcdef1").is_ok());
+        assert!(git_sha(&"a".repeat(40)).is_ok());
+        assert!(git_sha(&"f".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn git_sha_rejects_invalid() {
+        assert!(git_sha("abc").is_err());  // too short
+        assert!(git_sha("abcdefg").is_err());  // non-hex 'g'
+        assert!(git_sha("../evil").is_err());
+        assert!(git_sha(&"a".repeat(65)).is_err());  // too long
     }
 }

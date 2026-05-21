@@ -91,6 +91,14 @@ pub async fn upload_for_push(
 
         let pt = trace_pending::load_snapshot(&path)?;
         let text = format_for_memwal(&sha, &pt);
+        if let crate::betterleaks::ScanOutcome::SecretsFound { output } =
+            crate::betterleaks::scan_text(&text)
+        {
+            return Err(WalGitError::other(format!(
+                "betterleaks: secrets detected in trace for {} — upload aborted\n{}",
+                sha, output
+            )));
+        }
         let job = client
             .remember(&text, Some(namespace))
             .await
@@ -180,6 +188,18 @@ pub async fn upload(commit: Option<String>, namespace_override: Option<String>) 
     ui::info(format!("namespace: {}", ui::highlight(&namespace)));
     ui::info(format!("relayer:   {}", ui::dim(&client.account_id)));
 
+    // Gate: require betterleaks before any trace leaves the machine.
+    let scan_enabled = if !crate::betterleaks::is_available() {
+        if !crate::betterleaks::confirm_continue_without_scan() {
+            return Err(WalGitError::other(
+                "upload aborted — install betterleaks and retry".to_string(),
+            ));
+        }
+        false
+    } else {
+        true
+    };
+
     let mut ok = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for (sha, path) in entries {
@@ -193,6 +213,18 @@ pub async fn upload(commit: Option<String>, namespace_override: Option<String>) 
         // SHA, agent_id, and task — those are the signals semantic recall
         // wants ("show me past traces touching X").
         let text = format_for_memwal(&sha, &pt);
+        if scan_enabled {
+            if let crate::betterleaks::ScanOutcome::SecretsFound { output } =
+                crate::betterleaks::scan_text(&text)
+            {
+                failed.push(format!("{} (betterleaks: secrets detected — {})", sha, output));
+                ui::warn(format!(
+                    "{} skipped: betterleaks detected secrets in trace",
+                    ui::short_hash(&sha)
+                ));
+                continue;
+            }
+        }
         match client.remember(&text, Some(&namespace)).await {
             Ok(resp) => {
                 ok += 1;

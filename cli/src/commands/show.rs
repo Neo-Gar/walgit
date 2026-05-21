@@ -100,7 +100,7 @@ async fn try_memwal_resolve(sha: &str, namespace: &str) -> Result<Option<Trace>>
     };
     let priv_bytes = mw.load_delegate_key()?;
     let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
-    let resp = client.recall(sha, Some(3), Some(namespace)).await?;
+    let resp = client.recall(sha, Some(3), Some(namespace), None).await?;
 
     // The top result is our most likely hit — the SHA is in the header line
     // so it should rank #1 for a query equal to the SHA. Scan all returned

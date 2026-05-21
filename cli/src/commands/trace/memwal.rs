@@ -91,15 +91,15 @@ pub async fn upload_for_push(
 
         let pt = trace_pending::load_snapshot(&path)?;
         let text = format_for_memwal(&sha, &pt);
-        client
+        let job = client
             .remember(&text, Some(namespace))
             .await
             .map_err(|e| WalGitError::other(format!("MemWal upload for {}: {}", sha, e)))?;
 
-        // Mark as uploaded so a re-push doesn't double-ship. We deliberately
-        // do NOT delete the snapshot — keeping it lets `walgit show --trace`
-        // resolve from local cache without a network round-trip.
-        std::fs::write(&marker, "")?;
+        // Write the job_id into the marker file so we can check status later
+        // and know whether the async Walrus upload actually succeeded.
+        let job_id = job.job_id.as_deref().unwrap_or("unknown");
+        std::fs::write(&marker, job_id)?;
         summary.uploaded += 1;
     }
 
@@ -221,69 +221,302 @@ pub async fn upload(commit: Option<String>, namespace_override: Option<String>) 
     Ok(())
 }
 
-/// Pull semantic matches for `query` from the project's namespace.
-pub async fn recall(query: String, limit: u32, namespace_override: Option<String>) -> Result<()> {
+/// Pull matches for `query`. Tries MemWal semantic search first; falls back
+/// to local keyword search when MemWal has no results (e.g. Walrus upload
+/// jobs are still pending or the Enoki rate limit is exhausted).
+pub async fn recall(
+    query: String,
+    limit: u32,
+    namespace_override: Option<String>,
+    threshold: Option<f32>,
+) -> Result<()> {
     use crate::memwal::MemWalClient;
 
-    let cfg = crate::config::load()?;
-    let mw = cfg.memwal.as_ref().ok_or_else(|| {
-        WalGitError::other("[memwal] not configured (see `walgit trace upload --help`)")
-    })?;
-    let priv_bytes = mw.load_delegate_key()?;
-    let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
-
-    let namespace = namespace_override
-        .unwrap_or_else(|| default_namespace().unwrap_or_else(|| "default".into()));
-    let resp = client.recall(&query, Some(limit), Some(&namespace)).await?;
-
     ui::header(&format!("recall: \"{}\"", query));
-    if resp.results.is_empty() {
-        match resp.dropped_count.unwrap_or(0) {
-            0 => ui::info("no matches"),
-            n => ui::info(format!(
-                "no matches above similarity threshold ({} item(s) in namespace were too distant)",
-                n
-            )),
-        }
+
+    // ── MemWal semantic search ────────────────────────────────────────
+    let memwal_found = if let Ok(cfg) = crate::config::load() {
+        if let (Some(mw), Ok(priv_bytes)) =
+            (cfg.memwal.as_ref(), cfg.memwal.as_ref().map(|m| m.load_delegate_key()).unwrap_or(Err(crate::error::WalGitError::other(""))))
+        {
+            let client = MemWalClient::new(mw.relayer_url.clone(), mw.account_id.clone(), priv_bytes);
+            let namespace = namespace_override
+                .clone()
+                .unwrap_or_else(|| default_namespace().unwrap_or_else(|| "default".into()));
+            match client.recall(&query, Some(limit), Some(&namespace), threshold).await {
+                Ok(resp) if !resp.results.is_empty() => {
+                    for (i, m) in resp.results.iter().enumerate() {
+                        let dist_str = m
+                            .distance
+                            .map(|d| format!("dist={:.3}", d))
+                            .unwrap_or_else(|| "-".into());
+                        println!("  {}", ui::dim(&format!("#{} {} [MemWal]", i + 1, dist_str)));
+                        if let Some(t) = &m.text {
+                            let display = t.split("---json---").next().unwrap_or(t.as_str());
+                            for line in display.lines().take(6) {
+                                println!("    {}", line);
+                            }
+                            if display.lines().count() > 6 {
+                                println!("    {}", ui::dim("…"));
+                            }
+                        }
+                        println!();
+                    }
+                    true
+                }
+                Ok(resp) => {
+                    let total = resp.total.unwrap_or(0);
+                    let dropped = resp.dropped_count.unwrap_or(0);
+                    if total == 0 && dropped == 0 {
+                        ui::info(
+                            "MemWal: namespace is empty — traces may not have uploaded yet",
+                        );
+                    } else if dropped > 0 {
+                        ui::info(format!(
+                            "MemWal: {dropped} trace(s) below similarity threshold"
+                        ));
+                    }
+                    false
+                }
+                Err(e) => {
+                    ui::warn(format!("MemWal: {}", e));
+                    false
+                }
+            }
+        } else { false }
+    } else { false };
+
+    if memwal_found {
         return Ok(());
     }
-    for (i, m) in resp.results.iter().enumerate() {
-        let dist = m
-            .distance
-            .or(m.score)
-            .map(|d| format!("{:.3}", d))
-            .unwrap_or_else(|| "-".into());
-        println!("  {} {}", ui::dim(&format!("#{} dist={}", i + 1, dist)), "");
-        if let Some(t) = &m.text {
-            for line in t.lines().take(4) {
+
+    // ── Local keyword fallback ────────────────────────────────────────
+    let git_dir = match current_git_dir() {
+        Ok(d) => d,
+        Err(_) => {
+            ui::info("not inside a git repository — no local traces to search");
+            return Ok(());
+        }
+    };
+
+    let snapshots = trace_pending::list_snapshots(&git_dir).unwrap_or_default();
+    if snapshots.is_empty() {
+        ui::info("no local trace snapshots found in this repository");
+        return Ok(());
+    }
+
+    let q_lower = query.to_lowercase();
+    let mut hits: Vec<(String, String)> = snapshots
+        .iter()
+        .filter_map(|(sha, path)| {
+            let pt = trace_pending::load_snapshot(path).ok()?;
+            let text = format_for_memwal(sha, &pt);
+            if text.to_lowercase().contains(&q_lower) {
+                Some((sha.clone(), text))
+            } else {
+                None
+            }
+        })
+        .take(limit as usize)
+        .collect();
+    hits.sort_by(|(a, _), (b, _)| b.cmp(a)); // newest SHA first
+
+    if hits.is_empty() {
+        ui::info(format!("no local traces contain \"{}\"", query));
+    } else {
+        println!("  {}", ui::dim("local search (MemWal unavailable):"));
+        println!();
+        for (i, (sha, text)) in hits.iter().enumerate() {
+            println!(
+                "  {}",
+                ui::dim(&format!("#{} {} [local]", i + 1, ui::short_hash(sha)))
+            );
+            for line in text.lines().take(6) {
                 println!("    {}", line);
             }
-            if t.lines().count() > 4 {
+            if text.lines().count() > 6 {
                 println!("    {}", ui::dim("…"));
             }
+            println!();
         }
-        println!();
     }
+
     Ok(())
 }
 
 // ─── serialization helpers ───────────────────────────────────────────────────
 
+/// Separator used in older v2 payloads that included a JSON block.
+/// Kept only for [`parse_memwal_payload`] backward-compat parsing.
+const JSON_SEPARATOR: &str = "---json---";
+
 /// Pack a snapshot for MemWal indexing.
 ///
-/// Format: one-line header (`walgit-trace commit:<sha>`) followed by the
-/// raw `PendingTrace` JSON body. Both parts are embedded in `text` for the
-/// relayer to embed; on read we strip the header and reparse the JSON to
-/// reconstruct a typed [`Trace`]. The header is also a strong semantic
-/// signal — a recall query containing `<sha>` will preferentially match.
+/// We send **only the natural-language block** — no JSON. Embedding a raw JSON
+/// blob alongside the NL text destroys cosine-similarity scores because the
+/// tokeniser treats `{}[]":` as noise with no semantic content. The full
+/// structured trace lives in the local `.git/walgit/traces/<sha>.json` file
+/// and is not needed for search.
 pub fn format_for_memwal(commit_sha: &str, pt: &PendingTrace) -> String {
-    let body = serde_json::to_string_pretty(pt).unwrap_or_else(|_| "{}".to_string());
-    format!("{}{}\n{}", MEMWAL_HEADER_PREFIX, commit_sha, body)
+    natural_language_block(commit_sha, pt)
+}
+
+/// Return the last component of a path string (file or directory name).
+/// Falls back to the whole string if there's no separator.
+fn basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// Strip `git -C /some/absolute/path ` prefixes from every `&&`-chained
+/// segment. E.g. `git -C /abs add f && git -C /abs commit -m "msg"` →
+/// `git add f && git commit -m "msg"`.
+fn strip_git_dash_c(cmd: &str) -> String {
+    cmd.split("&&")
+        .map(|seg| strip_one_git_dash_c(seg.trim()))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+fn strip_one_git_dash_c(seg: &str) -> String {
+    if let Some(rest) = seg.strip_prefix("git -C ") {
+        if let Some(space) = rest.find(' ') {
+            let path_candidate = &rest[..space];
+            if path_candidate.starts_with('/') {
+                return format!("git {}", rest[space + 1..].trim());
+            }
+        }
+    }
+    seg.to_string()
+}
+
+/// Build the human-readable block that gets embedded by MemWal.
+fn natural_language_block(commit_sha: &str, pt: &PendingTrace) -> String {
+    let mut lines = vec![
+        format!("{}{}", MEMWAL_HEADER_PREFIX, commit_sha),
+        format!("agent: {}", pt.agent_id),
+    ];
+
+    // Task: use the stored value or fall back to a hint derived from tools.
+    let task = pt.task.trim();
+    if !task.is_empty() {
+        lines.push(format!("task: {}", task));
+    } else if let Some(hint) = derive_task_hint(pt) {
+        lines.push(format!("task: {}", hint));
+    }
+
+    // Files touched by Edit/Write/Read operations. Use only the final
+    // component of the path so absolute paths don't add noise to embeddings.
+    let files: Vec<String> = pt
+        .tools_called
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.name.as_str(),
+                "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+            )
+        })
+        .map(|t| basename(t.input_summary.trim()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !files.is_empty() {
+        lines.push(format!("files modified: {}", files.join(", ")));
+    }
+
+    // Bash commands — strip `git -C /absolute/path` prefixes so the actual
+    // intent (e.g. "git add test.txt") is what the embedding model sees.
+    let cmds: Vec<String> = pt
+        .tools_called
+        .iter()
+        .filter(|t| t.name == "Bash")
+        .map(|t| strip_git_dash_c(t.input_summary.trim()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !cmds.is_empty() {
+        lines.push(format!("commands: {}", cmds.join("; ")));
+    }
+
+    // Deduplicated list of tools (order-preserving).
+    if !pt.tools_called.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&str> = pt
+            .tools_called
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|&n| seen.insert(n))
+            .collect();
+        lines.push(format!("tools used: {}", unique.join(", ")));
+    }
+
+    if !pt.decision.trim().is_empty() {
+        lines.push(format!("decision: {}", pt.decision.trim()));
+    }
+    if !pt.alternatives_considered.is_empty() {
+        lines.push(format!(
+            "alternatives: {}",
+            pt.alternatives_considered.join("; ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Try to extract a short task description from Bash commands when the
+/// `task` field is empty.
+///
+/// Handles two patterns from Claude Code commits:
+/// - Inline:  `git commit -m "fix the bug"`
+/// - Heredoc: `git commit -m "$(cat <<'EOF'\nfix the bug\n\nCo-Authored-By…\nEOF\n)"`
+fn derive_task_hint(pt: &PendingTrace) -> Option<String> {
+    for tc in &pt.tools_called {
+        if tc.name != "Bash" {
+            continue;
+        }
+        let cmd = &tc.input_summary;
+        let pos = cmd.find("commit -m")?;
+        let after = cmd[pos + 9..].trim();
+
+        // Heredoc: $(cat <<'EOF'\n<message subject>\n...)
+        // The actual subject line is the first non-empty line after the EOF marker.
+        for marker in &["<<'EOF'", "<<EOF", "<<'eof'", "<<eof"] {
+            if let Some(eof_pos) = after.find(marker) {
+                let body = &after[eof_pos + marker.len()..];
+                let subject = body
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty() && *l != "EOF" && *l != "eof");
+                if let Some(s) = subject {
+                    return Some(s.to_string());
+                }
+            }
+        }
+
+        // Inline: git commit -m "message" or git commit -m 'message'
+        let q = after.chars().next()?;
+        if q == '"' || q == '\'' {
+            let inner = &after[1..];
+            // Don't expand heredoc expansions $(cat ...)
+            if inner.starts_with("$(") {
+                continue;
+            }
+            let end = inner.find(q).unwrap_or(inner.len());
+            let msg = inner[..end].trim();
+            if !msg.is_empty() {
+                return Some(msg.lines().next().unwrap_or(msg).to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Inverse of [`format_for_memwal`]. Returns `Some((commit_sha, PendingTrace))`
-/// when `text` is something we wrote; `None` if it doesn't match our shape
-/// (e.g., a user manually put a different memory in the same namespace).
+/// when `text` is something we wrote; `None` if it doesn't match our shape.
+///
+/// Handles both v2 (natural language + `---json---` + JSON) and v1 (JSON
+/// immediately after the header) so old MemWal entries stay readable.
 pub fn parse_memwal_payload(text: &str) -> Option<(String, PendingTrace)> {
     let mut lines = text.lines();
     let header = lines.next()?;
@@ -291,9 +524,66 @@ pub fn parse_memwal_payload(text: &str) -> Option<(String, PendingTrace)> {
         .strip_prefix(MEMWAL_HEADER_PREFIX)?
         .trim()
         .to_string();
-    let body: String = lines.collect::<Vec<_>>().join("\n");
-    let pt: PendingTrace = serde_json::from_str(body.trim()).ok()?;
+
+    let rest: String = lines.collect::<Vec<_>>().join("\n");
+
+    // v2: find the JSON block after the separator.
+    let json_body = if let Some(sep_pos) = rest.find(JSON_SEPARATOR) {
+        rest[sep_pos + JSON_SEPARATOR.len()..].trim().to_string()
+    } else {
+        // v1 fallback: everything after the header is JSON.
+        rest.trim().to_string()
+    };
+
+    let pt: PendingTrace = serde_json::from_str(&json_body).ok()?;
     Some((sha, pt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trace::ToolCall;
+
+    fn make_pt_with_bash(cmd: &str) -> PendingTrace {
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.tools_called.push(ToolCall {
+            name: "Bash".into(),
+            input_summary: cmd.into(),
+            output_summary: "ok".into(),
+        });
+        pt
+    }
+
+    #[test]
+    fn derive_task_hint_heredoc() {
+        let cmd = "git -C /abs/path add test.txt && git -C /abs/path commit -m \"$(cat <<'EOF'\nupdate test.txt content to HELLO BOYZ!\n\nCo-Authored-By: Claude\nEOF\n)\"";
+        let pt = make_pt_with_bash(cmd);
+        let hint = derive_task_hint(&pt);
+        assert_eq!(hint.as_deref(), Some("update test.txt content to HELLO BOYZ!"));
+    }
+
+    #[test]
+    fn derive_task_hint_inline() {
+        let pt = make_pt_with_bash("git commit -m \"fix the bug\"");
+        assert_eq!(derive_task_hint(&pt).as_deref(), Some("fix the bug"));
+    }
+
+    #[test]
+    fn strip_git_dash_c_chained() {
+        let cmd = "git -C /abs/path add test.txt && git -C /abs/path commit -m \"msg\"";
+        let result = strip_git_dash_c(cmd);
+        assert_eq!(result, "git add test.txt && git commit -m \"msg\"");
+    }
+
+    #[test]
+    fn format_for_memwal_no_json() {
+        let pt = make_pt_with_bash("git -C /abs/path add test.txt && git -C /abs/path commit -m \"$(cat <<'EOF'\nadd test file\nEOF\n)\"");
+        let text = format_for_memwal("abc123", &pt);
+        assert!(!text.contains("---json---"), "should not contain JSON separator");
+        assert!(!text.contains('{'), "should not contain raw JSON");
+        assert!(text.contains("task: add test file"));
+        assert!(text.contains("git add test.txt"));
+    }
 }
 
 /// Pick a stable MemWal namespace for the current repo.

@@ -28,7 +28,8 @@ pub use install::{
     uninstall,
 };
 pub use memwal::{
-    UploadPushSummary, format_for_memwal, parse_memwal_payload, recall, upload, upload_for_push,
+    UploadPushSummary, format_for_memwal, parse_memwal_payload, recall, upload,
+    upload_for_push,
 };
 pub use record::{ClaudeEvent, RecordKind, record};
 

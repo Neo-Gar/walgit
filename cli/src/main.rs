@@ -160,7 +160,8 @@ async fn main() -> Result<()> {
                     query,
                     limit,
                     namespace,
-                } => t::recall(query, limit, namespace).await?,
+                    threshold,
+                } => t::recall(query, limit, namespace, threshold).await?,
                 TraceAction::Install {
                     agent,
                     no_global,

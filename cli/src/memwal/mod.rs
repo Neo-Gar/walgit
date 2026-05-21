@@ -118,13 +118,58 @@ impl MemWalClient {
         query: &str,
         limit: Option<u32>,
         namespace: Option<&str>,
+        min_score: Option<f32>,
     ) -> Result<RecallResponse> {
         let body = RecallRequest {
             query: query.to_string(),
             limit,
             namespace: namespace.map(str::to_string),
+            min_score,
         };
-        self.post_signed("/api/recall", &body).await
+        // x-delegate-key enables SEAL decryption on the server side:
+        // sidecar builds a SessionKey from this key and uses it to request
+        // decryption shares from the SEAL key servers. The MemWal Move
+        // contract approves registered delegates, so this suffices.
+        let delegate_key_hex = hex::encode(self.delegate_key.to_bytes());
+        self.post_signed_with_seal("/api/recall", &body, &delegate_key_hex)
+            .await
+    }
+
+    /// GET a path with signed auth headers. Used for job-status polling.
+    pub async fn get_signed_raw(&self, path: &str) -> Result<String> {
+        let body_sha256 = hex::encode(Sha256::digest(b""));
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let signed = auth::sign_request(
+            &self.delegate_key,
+            &ts,
+            "GET",
+            path,
+            &body_sha256,
+            &nonce,
+            &self.account_id,
+        );
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-public-key", signed.public_key_hex)
+            .header("x-signature", signed.signature_hex)
+            .header("x-timestamp", ts)
+            .header("x-nonce", nonce)
+            .header("x-account-id", &self.account_id)
+            .send()
+            .await
+            .map_err(http_err)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(http_err)?;
+        if !status.is_success() {
+            return Err(WalGitError::other(format!(
+                "MemWal GET {} returned {}: {}",
+                path, status, text
+            )));
+        }
+        Ok(text)
     }
 
     /// POST JSON to a path with the relayer's Ed25519 auth headers attached.
@@ -161,6 +206,66 @@ impl MemWalClient {
             .header("x-timestamp", ts)
             .header("x-nonce", nonce)
             .header("x-account-id", &self.account_id)
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(http_err)?;
+
+        let status = resp.status();
+        let text = resp.text().await.map_err(http_err)?;
+        if !status.is_success() {
+            return Err(WalGitError::other(format!(
+                "MemWal POST {} returned {}: {}",
+                path, status, text
+            )));
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            WalGitError::other(format!(
+                "MemWal POST {}: malformed JSON ({}): {}",
+                path, e, text
+            ))
+        })
+    }
+
+    /// Like `post_signed` but also attaches `x-delegate-key` for SEAL-decrypt
+    /// requests (recall, ask). The sidecar builds a `SessionKey` from this key
+    /// so the SEAL key servers can verify delegation via the Move contract.
+    async fn post_signed_with_seal<TReq, TResp>(
+        &self,
+        path: &str,
+        body: &TReq,
+        delegate_key_hex: &str,
+    ) -> Result<TResp>
+    where
+        TReq: Serialize,
+        TResp: serde::de::DeserializeOwned,
+    {
+        let body_bytes = serde_json::to_vec(body)?;
+        let body_sha256 = hex::encode(Sha256::digest(&body_bytes));
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let nonce = uuid::Uuid::new_v4().to_string();
+
+        let signed = auth::sign_request(
+            &self.delegate_key,
+            &ts,
+            "POST",
+            path,
+            &body_sha256,
+            &nonce,
+            &self.account_id,
+        );
+
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-public-key", signed.public_key_hex)
+            .header("x-signature", signed.signature_hex)
+            .header("x-timestamp", ts)
+            .header("x-nonce", nonce)
+            .header("x-account-id", &self.account_id)
+            .header("x-delegate-key", delegate_key_hex)
             .body(body_bytes)
             .send()
             .await
@@ -223,6 +328,11 @@ struct RecallRequest {
     limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     namespace: Option<String>,
+    /// Minimum cosine similarity (0.0–1.0). Overrides the relayer's default
+    /// threshold. Lower values return more results but may surface weaker
+    /// matches. The relayer accepts this field only when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_score: Option<f32>,
 }
 
 /// Response from `POST /api/recall`. The relayer returns

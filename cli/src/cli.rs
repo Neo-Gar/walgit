@@ -315,6 +315,11 @@ pub enum TraceAction {
         limit: u32,
         #[arg(long)]
         namespace: Option<String>,
+        /// Minimum similarity score (0.0–1.0). Lower values broaden the search.
+        /// Default: relayer's built-in threshold (typically ~0.5).
+        /// Try 0.3 if you're getting "no matches" for queries you expect to hit.
+        #[arg(long)]
+        threshold: Option<f32>,
     },
 
     /// Install hooks so traces are recorded automatically. Idempotent.
@@ -356,6 +361,7 @@ pub enum TraceAction {
         #[arg(long)]
         purge_global: bool,
     },
+
 }
 
 #[derive(Subcommand)]

@@ -26,19 +26,51 @@ fn short_ids_enabled() -> bool {
 /// Tagline shown under the banner.
 const TAGLINE: &str = "decentralized git on walrus + sui";
 
-const BANNER: &str = r"
- ██╗    ██╗ █████╗ ██╗      ██████╗ ██╗████████╗
- ██║    ██║██╔══██╗██║     ██╔════╝ ██║╚══██╔══╝
- ██║ █╗ ██║███████║██║     ██║  ███╗██║   ██║
- ██║███╗██║██╔══██║██║     ██║   ██║██║   ██║
- ╚███╔███╔╝██║  ██║███████╗╚██████╔╝██║   ██║
-  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝";
+/// The six rows of the WalGit wordmark.
+const BANNER_LINES: [&str; 6] = [
+    " ██╗    ██╗ █████╗ ██╗      ██████╗ ██╗████████╗",
+    " ██║    ██║██╔══██╗██║     ██╔════╝ ██║╚══██╔══╝",
+    " ██║ █╗ ██║███████║██║     ██║  ███╗██║   ██║",
+    " ██║███╗██║██╔══██║██║     ██║   ██║██║   ██║",
+    " ╚███╔███╔╝██║  ██║███████╗╚██████╔╝██║   ██║",
+    "  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝",
+];
 
-/// Print the WalGit banner in cyan with a tagline.
+/// Purple→teal gradient, one RGB triple per banner row. Matches the colours
+/// the `install.sh` bootstrap prints, so the installer and CLI share a look.
+const BANNER_GRADIENT: [(u8, u8, u8); 6] = [
+    (163, 113, 247),
+    (139, 124, 248),
+    (116, 150, 240),
+    (96, 178, 232),
+    (86, 200, 222),
+    (88, 217, 214),
+];
+
+/// Print the WalGit banner with a tagline. Renders as a 24-bit purple→teal
+/// gradient on truecolor terminals, falls back to a single cyan wordmark
+/// otherwise, and to plain text when colours are disabled (NO_COLOR / no tty).
 pub fn banner() {
-    println!("{}", style(BANNER).cyan().bold());
+    println!();
+    if console::colors_enabled() && truecolor_supported() {
+        for (line, (r, g, b)) in BANNER_LINES.iter().zip(BANNER_GRADIENT.iter()) {
+            // Raw ANSI: console's Color enum has no 24-bit variant.
+            println!("\x1b[1;38;2;{};{};{}m{}\x1b[0m", r, g, b, line);
+        }
+    } else {
+        for line in BANNER_LINES.iter() {
+            println!("{}", style(line).cyan().bold());
+        }
+    }
     println!("  {}", style(TAGLINE).dim());
     println!();
+}
+
+/// True when the terminal advertises 24-bit colour via `COLORTERM`.
+fn truecolor_supported() -> bool {
+    std::env::var("COLORTERM")
+        .map(|v| v == "truecolor" || v == "24bit")
+        .unwrap_or(false)
 }
 
 /// Print a styled section header like `── init ──────────────────────`.

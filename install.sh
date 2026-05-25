@@ -41,6 +41,55 @@ prompt_yn() {
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "required tool not found: $1"; }
 
+# Colour support: only when stdout is a terminal and NO_COLOR is unset.
+# TRUECOLOR (24-bit) unlocks the gradient banner; otherwise we fall back to a
+# single-colour cyan wordmark, then to plain text when there's no tty at all.
+USE_COLOR=0
+TRUECOLOR=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  USE_COLOR=1
+  case "${COLORTERM:-}" in truecolor|24bit) TRUECOLOR=1 ;; esac
+fi
+
+# WalGit wordmark — matches the banner printed by the `walgit` CLI (ui.rs),
+# painted as a purple→teal gradient that echoes the docs accent colours.
+banner() {
+  printf '\n'
+  set -- \
+"   ██╗    ██╗ █████╗ ██╗      ██████╗ ██╗████████╗" \
+"   ██║    ██║██╔══██╗██║     ██╔════╝ ██║╚══██╔══╝" \
+"   ██║ █╗ ██║███████║██║     ██║  ███╗██║   ██║" \
+"   ██║███╗██║██╔══██║██║     ██║   ██║██║   ██║" \
+"   ╚███╔███╔╝██║  ██║███████╗╚██████╔╝██║   ██║" \
+"    ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝"
+  if [ "$TRUECOLOR" = "1" ]; then
+    _i=1
+    for _line in "$@"; do
+      case $_i in
+        1) _rgb="163;113;247" ;;
+        2) _rgb="139;124;248" ;;
+        3) _rgb="116;150;240" ;;
+        4) _rgb="96;178;232"  ;;
+        5) _rgb="86;200;222"  ;;
+        *) _rgb="88;217;214"  ;;
+      esac
+      printf '\033[1;38;2;%sm%s\033[0m\n' "$_rgb" "$_line"
+      _i=$((_i + 1))
+    done
+  elif [ "$USE_COLOR" = "1" ]; then
+    for _line in "$@"; do printf '\033[1;36m%s\033[0m\n' "$_line"; done
+  else
+    for _line in "$@"; do printf '%s\n' "$_line"; done
+  fi
+  if [ "$USE_COLOR" = "1" ]; then
+    printf '   \033[2m%s\033[0m\n\n' "decentralized git on walrus + sui"
+  else
+    printf '   %s\n\n' "decentralized git on walrus + sui"
+  fi
+}
+
+banner
+
 need curl
 need tar
 need uname

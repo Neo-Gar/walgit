@@ -23,6 +23,22 @@ info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 fail()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Yes/No prompt. $1 = question, $2 = default (y|n, default n). Reads from
+# /dev/tty so it still works when this script is piped (`curl … | sh`). With no
+# tty available (fully non-interactive), falls back to the default answer.
+prompt_yn() {
+  _q="$1"; _def="${2:-n}"
+  case "$_def" in y|Y) _hint="[Y/n]" ;; *) _hint="[y/N]" ;; esac
+  if [ -r /dev/tty ]; then
+    printf '%s %s ' "$_q" "$_hint" > /dev/tty
+    read -r _ans < /dev/tty || _ans=""
+  else
+    _ans=""
+  fi
+  [ -z "$_ans" ] && _ans="$_def"
+  case "$_ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || fail "required tool not found: $1"; }
 
 need curl
@@ -113,38 +129,30 @@ case ":$PATH:" in
 esac
 
 # ---- betterleaks (secret scanning) -----------------------------------------
+# Install methods per upstream (github.com/betterleaks/betterleaks):
+#   brew install betterleaks         (macOS + Linuxbrew)
+#   sudo dnf install betterleaks     (Fedora/RHEL)
+#   docker pull ghcr.io/betterleaks/betterleaks:latest
+# Upstream does NOT publish a `go install` path — don't add one.
 if [ "$SKIP_BETTERLEAKS" = "1" ]; then
   info "Skipping betterleaks install (WALGIT_SKIP_BETTERLEAKS=1)"
 elif command -v betterleaks >/dev/null 2>&1; then
   info "betterleaks already installed: $(betterleaks --version 2>/dev/null | head -n1)"
 else
   info "Installing betterleaks (secret scanner)..."
-  case "$(uname -s)" in
-    Darwin)
-      if command -v brew >/dev/null 2>&1; then
-        brew install betterleaks \
-          || warn "brew install betterleaks failed; install it manually: https://github.com/betterleaks/betterleaks"
-      else
-        warn "Homebrew not found. Install betterleaks manually:"
-        warn "  brew install betterleaks"
-        warn "  or: go install github.com/betterleaks/betterleaks@latest"
-      fi
-      ;;
-    Linux)
-      if command -v go >/dev/null 2>&1; then
-        go install github.com/betterleaks/betterleaks@latest \
-          || warn "go install betterleaks failed; install it manually: https://github.com/betterleaks/betterleaks"
-      else
-        warn "Go not found. Install betterleaks manually:"
-        warn "  go install github.com/betterleaks/betterleaks@latest"
-        warn "  or use Docker: docker run --rm -v \$(pwd):/repo ghcr.io/betterleaks/betterleaks:latest git /repo"
-      fi
-      ;;
-    *)
-      warn "Unsupported OS for automatic betterleaks install."
-      warn "See: https://github.com/betterleaks/betterleaks"
-      ;;
-  esac
+  if command -v brew >/dev/null 2>&1; then
+    brew install betterleaks \
+      || warn "brew install betterleaks failed; see https://github.com/betterleaks/betterleaks"
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y betterleaks \
+      || warn "dnf install betterleaks failed; see https://github.com/betterleaks/betterleaks"
+  else
+    warn "Could not auto-install betterleaks (no brew or dnf found). Install it manually:"
+    warn "  macOS / Linuxbrew : brew install betterleaks"
+    warn "  Fedora / RHEL     : sudo dnf install betterleaks"
+    warn "  Docker            : docker pull ghcr.io/betterleaks/betterleaks:latest"
+    warn "  Docs              : https://github.com/betterleaks/betterleaks"
+  fi
 fi
 
 # ---- sui via suiup ----------------------------------------------------------
@@ -161,6 +169,35 @@ else
   else
     warn "suiup was installed but is not in PATH. Reopen your shell or add ~/.local/bin to PATH, then run: suiup install sui@${NETWORK}"
   fi
+fi
+
+# ---- sui wallet -------------------------------------------------------------
+# WalGit needs a Sui address to create repos and pay gas. suiup installs the
+# `sui` binary but does not create a wallet, so offer to create one here.
+if command -v sui >/dev/null 2>&1; then
+  # Only query active-address when a client config already exists — otherwise
+  # `sui client` would drop into its interactive first-run setup.
+  if [ -f "$HOME/.sui/sui_config/client.yaml" ] && sui client active-address >/dev/null 2>&1; then
+    info "Sui wallet detected: $(sui client active-address 2>/dev/null)"
+  else
+    warn "No Sui wallet/address is configured. WalGit needs one to create repos and pay gas."
+    if prompt_yn "Create a Sui wallet now (sui client new-address ed25519 walgit-account)?" "y"; then
+      # Redirect stdin from the tty so sui's own prompts (e.g. fullnode setup
+      # on first run) reach the user even when this script is piped.
+      if [ -r /dev/tty ]; then
+        sui client new-address ed25519 walgit-account < /dev/tty \
+          || warn "wallet creation failed; create one later: sui client new-address ed25519 walgit-account"
+      else
+        sui client new-address ed25519 walgit-account \
+          || warn "wallet creation failed; create one later: sui client new-address ed25519 walgit-account"
+      fi
+    else
+      info "Skipped. Create a wallet later: sui client new-address ed25519 walgit-account"
+    fi
+  fi
+else
+  info "sui not on PATH yet — after reopening your shell, create a wallet:"
+  info "  sui client new-address ed25519 walgit-account"
 fi
 
 # ---- walrus -----------------------------------------------------------------
@@ -188,7 +225,17 @@ Security:
   $(command -v betterleaks >/dev/null 2>&1 && echo "betterleaks: installed" || echo "betterleaks: not found — scans will be skipped (WALGIT_SKIP_BETTERLEAKS=1 to silence)")
 
 Next steps:
-  walgit --help
-  walgit init <repo>
+  1. Configure the deployed WalGit package for your network (REQUIRED — every
+     on-chain command needs this; without it 'walgit init' will fail):
+       walgit config --package-id <PACKAGE_ID> --registry-id <REGISTRY_ID>
+
+  2. Create a repository:
+       walgit init <repo>
+
+  3. (Optional) Enable AI reasoning-trace memory — create an account at
+     https://memwal.ai (Mainnet) / https://staging.memwal.ai (Testnet), then:
+       walgit memwal init
+
+  walgit --help    for all commands
 
 EOF

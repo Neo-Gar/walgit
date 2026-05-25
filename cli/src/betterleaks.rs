@@ -154,9 +154,10 @@ pub fn confirm_continue_without_scan() -> bool {
         "  ║  A leaked secret cannot be revoked by deleting a file.           ║\n",
         "  ║                                                                  ║\n",
         "  ║  Install betterleaks:                                            ║\n",
-        "  ║    macOS : brew install betterleaks                              ║\n",
-        "  ║    Linux : go install github.com/betterleaks/betterleaks@latest  ║\n",
-        "  ║    Docs  : https://github.com/betterleaks/betterleaks            ║\n",
+        "  ║    macOS  : brew install betterleaks                             ║\n",
+        "  ║    Fedora : sudo dnf install betterleaks                         ║\n",
+        "  ║    Docker : docker pull ghcr.io/betterleaks/betterleaks:latest   ║\n",
+        "  ║    Docs   : https://github.com/betterleaks/betterleaks           ║\n",
         "  ╚══════════════════════════════════════════════════════════════════╝\n",
     );
 

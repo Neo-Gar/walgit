@@ -22,69 +22,108 @@ use crate::ui;
 use console::style;
 use std::path::PathBuf;
 
-/// `walgit memwal init` — generate a fresh Ed25519 delegate keypair, save the
-/// private half to disk with 0600 perms, write or refresh the `[memwal]`
-/// section in the global config, and print the public part the repo owner
-/// needs to register.
-pub async fn init(force: bool, account_id: Option<String>, relayer_url: Option<String>) -> Result<()> {
+/// `walgit memwal init` — interactively configure MemWal: prompts for the
+/// account ID, then masks-input the delegate private key (the web app already
+/// registered it on-chain). Saves the key to disk with 0600 perms and writes
+/// the `[memwal]` section in the global config.
+pub async fn init(force: bool, relayer_url: Option<String>) -> Result<()> {
     let mut cfg = config::load()?;
-
     let key_path = default_delegate_key_path()?;
 
-    if key_path.exists() && !force {
-        ui::warn(format!(
-            "delegate key already exists at {} — pass --force to overwrite",
-            key_path.display()
-        ));
-        // Still allow the user to update the rest of the [memwal] section even
-        // if they don't want to regenerate the key. This is the common case:
-        // user re-runs `walgit memwal init --account-id 0x...` to point at a
-        // different MemWalAccount without rotating their own keypair.
-        if account_id.is_some() || relayer_url.is_some() {
-            apply_config_updates(&mut cfg, account_id, relayer_url, &key_path)?;
-            config::save(&cfg)?;
-            ui::success("config updated (key untouched)");
+    // Bail early if memwal is already configured — protects the user from
+    // silently overwriting a working setup. `--force` opts into the rewrite.
+    let already_configured = cfg
+        .memwal
+        .as_ref()
+        .map(|m| !m.account_id.is_empty())
+        .unwrap_or(false);
+    if already_configured && !force {
+        let mw = cfg.memwal.as_ref().unwrap();
+        ui::header("memwal already configured");
+        println!(
+            "  {} {}",
+            ui::label("account  "),
+            ui::highlight(&mw.account_id)
+        );
+        println!("  {} {}", ui::label("relayer  "), ui::dim(&mw.relayer_url));
+        if let Some(p) = &mw.delegate_key_path {
+            println!("  {} {}", ui::label("key path "), ui::dim(p));
         }
-        print_status_summary(&cfg).await?;
+        println!();
+        ui::info("pass --force to reconfigure (overwrites the existing delegate key)");
         return Ok(());
     }
 
-    use rand::rngs::OsRng;
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-    let priv_hex = hex::encode(signing_key.to_bytes());
-    let pub_hex = hex::encode(signing_key.verifying_key().to_bytes());
-
-    // Write key file with restrictive perms BEFORE persisting config so a
-    // crash mid-init never leaves a config pointing at a missing key.
-    write_secret(&key_path, &priv_hex)?;
-    apply_config_updates(&mut cfg, account_id, relayer_url, &key_path)?;
-    config::save(&cfg)?;
-
-    let sui_addr = keystore::read_active_address(cfg.wallet_path.as_deref())
+    let active_addr = keystore::read_active_address(cfg.wallet_path.as_deref())
         .unwrap_or_else(|_| "(no Sui wallet configured)".into());
 
-    ui::header("memwal init — share these with the repo owner");
+    eprintln!();
+    eprintln!("  ╔══════════════════════════════════════════════════════════════════╗");
+    eprintln!("  ║           MEMWAL ACCOUNT SETUP                                   ║");
+    eprintln!("  ╠══════════════════════════════════════════════════════════════════╣");
+    eprintln!("  ║                                                                  ║");
+    eprintln!("  ║  Your active Sui address (connect THIS wallet on the web):       ║");
+    eprintln!("  ║    {:<64}║", &active_addr);
+    eprintln!("  ║                                                                  ║");
+    eprintln!("  ║  1. Open MemWal and sign in with the address above:              ║");
+    eprintln!("  ║       https://memwal.ai          (Mainnet)                       ║");
+    eprintln!("  ║       https://staging.memwal.ai  (Testnet)                       ║");
+    eprintln!("  ║                                                                  ║");
+    eprintln!("  ║  2. Create an account. The web app generates a delegate          ║");
+    eprintln!("  ║     keypair and registers it on-chain automatically.             ║");
+    eprintln!("  ║                                                                  ║");
+    eprintln!("  ║  3. Below: paste the account ID, then reveal & paste the key.    ║");
+    eprintln!("  ║     Key input is hidden — nothing lands in shell history.        ║");
+    eprintln!("  ╚══════════════════════════════════════════════════════════════════╝");
+    eprintln!();
+
+    let account_raw: String = dialoguer::Input::new()
+        .with_prompt("MemWal account ID (0x…)")
+        .interact_text()
+        .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
+    let account_id = account_raw.trim().to_string();
+    if !account_id.starts_with("0x") || account_id.len() < 4 {
+        return Err(WalGitError::config(
+            "account ID must be a Sui object ID starting with 0x",
+        ));
+    }
+
+    let raw = dialoguer::Password::new()
+        .with_prompt("MemWal private key (hex, input hidden)")
+        .interact()
+        .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
+    let trimmed = raw.trim().trim_start_matches("0x").to_string();
+    let bytes = hex::decode(&trimmed)
+        .map_err(|e| WalGitError::config(format!("private key is not valid hex: {}", e)))?;
+    let key_bytes: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        WalGitError::config(format!(
+            "private key must be 32 bytes (64 hex chars), got {}",
+            v.len()
+        ))
+    })?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+    let pub_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+    // Write key file BEFORE persisting config so a crash mid-init never
+    // leaves a config pointing at a missing key.
+    write_secret(&key_path, &trimmed)?;
+    apply_config_updates(&mut cfg, Some(account_id), relayer_url, &key_path)?;
+    config::save(&cfg)?;
+
+    ui::header("memwal configured");
     println!("  {} {}", ui::label("public_key"), ui::highlight(&pub_hex));
-    println!("  {} {}", ui::label("sui_addr  "), ui::highlight(&sui_addr));
+    println!("  {} {}", ui::label("sui_addr  "), ui::highlight(&active_addr));
+    println!(
+        "  {} {}",
+        ui::label("key path  "),
+        ui::dim(&key_path.display().to_string())
+    );
     println!();
     ui::info(format!(
         "delegate private key saved to {} (0600)",
         key_path.display()
     ));
-    if cfg.memwal.as_ref().and_then(|m| Some(m.account_id.is_empty())).unwrap_or(true)
-        || cfg.memwal.as_ref().map(|m| m.account_id.is_empty()).unwrap_or(true)
-    {
-        ui::warn("memwal.account_id not set in config — pass --account-id <0x...> or set it manually");
-    }
-    println!();
-    ui::info("the repo owner adds you on-chain with:");
-    println!(
-        "    {} walgit memwal add-delegate {} {} {}",
-        style("$").dim(),
-        pub_hex,
-        sui_addr,
-        style("--label \"My Laptop\"").dim()
-    );
+    ui::success("ready to use — key is already registered on-chain by the MemWal web app");
     Ok(())
 }
 
@@ -116,7 +155,11 @@ pub async fn list() -> Result<()> {
         return Ok(());
     }
     let my_pubkey = mw.load_delegate_key().ok().map(|k| {
-        hex::encode(ed25519_dalek::SigningKey::from_bytes(&k).verifying_key().to_bytes())
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&k)
+                .verifying_key()
+                .to_bytes(),
+        )
     });
     for d in &delegates {
         let mark = if Some(&d.public_key_hex) == my_pubkey.as_ref() {
@@ -161,7 +204,14 @@ pub async fn add_delegate(
     let pb = ui::spinner(format!("Registering delegate {}…", &pubkey_hex[..16]));
     let gas = ctx
         .sui
-        .memwal_add_delegate(&kp, pkg, &mw.account_id, &pubkey_bytes, &sui_address, &label)
+        .memwal_add_delegate(
+            &kp,
+            pkg,
+            &mw.account_id,
+            &pubkey_bytes,
+            &sui_address,
+            &label,
+        )
         .await?;
     pb.finish_and_clear();
     ui::success(format!("delegate '{}' added on chain", label));
@@ -283,8 +333,11 @@ async fn print_status_summary(cfg: &Config) -> Result<()> {
     }
     match mw.load_delegate_key() {
         Ok(k) => {
-            let pub_hex =
-                hex::encode(ed25519_dalek::SigningKey::from_bytes(&k).verifying_key().to_bytes());
+            let pub_hex = hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&k)
+                    .verifying_key()
+                    .to_bytes(),
+            );
             println!("  {} {}", ui::label("pubkey   "), ui::highlight(&pub_hex));
 
             // Best-effort: check whether our pubkey is on chain. Failure is

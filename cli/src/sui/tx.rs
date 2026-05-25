@@ -166,6 +166,10 @@ pub async fn execute_move_call(
                 let msg = format!("{}", e);
                 if msg.contains("unavailable for consumption")
                     || msg.contains("ObjectVersionUnavailable")
+                    || msg.contains("connection reset")
+                    || msg.contains("ConnectionReset")
+                    || msg.contains("transport error")
+                    || msg.contains("hyper::Error(Io")
                 {
                     last_err = Some(e);
                     continue;

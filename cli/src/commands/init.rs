@@ -7,12 +7,7 @@ use crate::error::{Result, WalGitError};
 use crate::{git, ui};
 use std::path::Path;
 
-pub async fn run(
-    name: String,
-    here: bool,
-    private: bool,
-    epochs: Option<u32>,
-) -> Result<()> {
+pub async fn run(name: String, here: bool, private: bool, epochs: Option<u32>) -> Result<()> {
     // Validate before any side effects — repo name flows into filesystem
     // paths (`cwd.join(&name)`) and URLs, so `../etc` or `--help` must die here.
     crate::validate::repo_name(&name)?;
@@ -37,10 +32,7 @@ pub async fn run(
         return Err(WalGitError::other(format!(
             "you already own a repository named '{}' on this network (id: {}).\n\
              Pick a different name, or use the existing repo (push url: walgit://{}/{}).",
-            name,
-            existing.id,
-            ctx.active_address,
-            name,
+            name, existing.id, ctx.active_address, name,
         )));
     }
 
@@ -80,11 +72,8 @@ pub async fn run(
     ui::header("git");
     if !repo_dir.join(".git").exists() {
         ui::info(format!("no git repository in {}", repo_dir.display()));
-        let proceed = ui::prompt_yes_no(
-            "initialize a fresh git repository here?",
-            true,
-        )
-        .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
+        let proceed = ui::prompt_yes_no("initialize a fresh git repository here?", true)
+            .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
         if !proceed {
             return Err(WalGitError::other(
                 "aborted: a git repository is required so that .walgit/ stays out of commits"
@@ -165,19 +154,15 @@ pub async fn run(
         ui::highlight(&name),
         if private { "private" } else { "public" }
     ));
-    ui::success(format!("{} → {}", remote_action, ui::highlight(&remote_url)));
+    ui::success(format!(
+        "{} → {}",
+        remote_action,
+        ui::highlight(&remote_url)
+    ));
 
     ui::header("summary");
-    println!(
-        "  {} {}",
-        ui::label("repository id "),
-        &repo_id
-    );
-    println!(
-        "  {} {}",
-        ui::label("access control"),
-        &acl_id
-    );
+    println!("  {} {}", ui::label("repository id "), &repo_id);
+    println!("  {} {}", ui::label("access control"), &acl_id);
     println!("  {} {}", ui::label("network       "), ctx.config.network);
     println!("  {} {}", ui::label("epochs        "), epochs);
     println!("  {} {}", ui::label("gas           "), gas.display());
@@ -186,6 +171,46 @@ pub async fn run(
         ui::label("push url      "),
         ui::highlight(&format!("walgit://{}/{}", ctx.active_address, name))
     );
+    // ─── Step 4 (optional): enable AI trace recording ────────────────────────
+    println!();
+    let enable_traces = ui::prompt_yes_no(
+        "Enable repo memory for this project? (AI reasoning trace recording)",
+        false,
+    )
+    .map_err(|e| WalGitError::other(format!("prompt failed: {}", e)))?;
+
+    if enable_traces {
+        // trace::install relies on the current directory — enter repo_dir first.
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(&repo_dir)?;
+        let install_result = crate::commands::trace::install(crate::commands::trace::InstallOpts {
+            agent_arg: Some("all".to_string()),
+            no_global: false,
+            global_only: false,
+        })
+        .await;
+        let _ = std::env::set_current_dir(original_dir);
+        match install_result {
+            Ok(()) => {
+                if ctx.config.memwal.is_none() {
+                    println!();
+                    ui::warn(
+                        "MemWal not configured — traces will be saved locally but not uploaded.",
+                    );
+                    ui::info(
+                        "Create an account at https://memwal.ai (Mainnet) / https://staging.memwal.ai (Testnet), then run:",
+                    );
+                    println!(
+                        "    {} {}",
+                        ui::dim("$"),
+                        ui::highlight("walgit memwal init"),
+                    );
+                }
+            }
+            Err(e) => ui::warn(format!("trace install failed: {}", e)),
+        }
+    }
+
     println!();
     ui::info("next steps:");
     if !here {

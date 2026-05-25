@@ -191,9 +191,8 @@ async fn main() -> Result<()> {
             match action {
                 MemwalAction::Init {
                     force,
-                    account_id,
                     relayer_url,
-                } => m::init(force, account_id, relayer_url).await?,
+                } => m::init(force, relayer_url).await?,
                 MemwalAction::Status => m::status().await?,
                 MemwalAction::List => m::list().await?,
                 MemwalAction::AddDelegate {

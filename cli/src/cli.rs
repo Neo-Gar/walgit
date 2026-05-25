@@ -126,15 +126,14 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum MemwalAction {
-    /// Generate a local Ed25519 delegate keypair and refresh `[memwal]` config.
-    /// Prints the public part for the repo owner to register.
+    /// Configure the MemWal delegate key and account ID.
+    /// Interactive: asks for the account ID and the private key (masked input,
+    /// never stored in shell history). Both values come from the MemWal web app
+    /// after you create an account.
     Init {
-        /// Overwrite the existing delegate key if one is already on disk.
+        /// Reconfigure even if memwal is already set up (overwrites the key).
         #[arg(long)]
         force: bool,
-        /// Set `memwal.account_id` in the global config.
-        #[arg(long)]
-        account_id: Option<String>,
         /// Override the relayer URL (defaults to staging on testnet,
         /// production on mainnet).
         #[arg(long)]

@@ -189,7 +189,16 @@ pub async fn create(
     };
 
     ui::header("walrus");
-    let upload = ctx.walrus.upload(bytes, local.epochs).await?;
+    let blob_owner = ctx
+        .config
+        .storage
+        .owner
+        .as_deref()
+        .unwrap_or(&ctx.active_address);
+    let upload = ctx
+        .walrus
+        .upload(bytes, local.epochs, ctx.config.storage.deletable, Some(blob_owner))
+        .await?;
 
     // ─── Create PR on chain ───────────────────────────────────────────────────
     ui::header("sui");
@@ -537,7 +546,21 @@ pub async fn merge(pr_id: String) -> Result<()> {
     git::merge_fast_forward(&repo_dir, &pr.target_branch, &source_tip)?;
 
     let merge_pack = git::pack_objects(&repo_dir)?;
-    let upload = ctx.walrus.upload(merge_pack, epochs).await?;
+    let merge_blob_owner = ctx
+        .config
+        .storage
+        .owner
+        .as_deref()
+        .unwrap_or(&ctx.active_address);
+    let upload = ctx
+        .walrus
+        .upload(
+            merge_pack,
+            epochs,
+            ctx.config.storage.deletable,
+            Some(merge_blob_owner),
+        )
+        .await?;
     let merge_head = git::get_head_commit(&repo_dir)?;
 
     let parent = ctx

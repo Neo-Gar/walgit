@@ -145,7 +145,7 @@ pub async fn run(url: String, yes: bool) -> Result<()> {
         network: Some(ctx.config.network.clone()),
         private: false,
         epochs: ctx.config.active_network()?.walrus.epochs,
-        pushes: vec![],
+        live_snapshots: vec![],
         forked_from: Some(original.id.clone()),
         forked_from_acl_id: Some(original.acl_id.clone()),
     };

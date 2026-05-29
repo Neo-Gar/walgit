@@ -41,6 +41,9 @@ pub async fn run(
     epochs: Option<u32>,
     short_ids: Option<bool>,
     betterleaks_skip: Option<bool>,
+    depth: Option<usize>,
+    keep: Option<usize>,
+    sponsored: Option<bool>,
     show: bool,
 ) -> Result<()> {
     let mut cfg = load()?;
@@ -51,6 +54,24 @@ pub async fn run(
 
     if let Some(v) = betterleaks_skip {
         cfg.betterleaks.skip = v;
+    }
+
+    if let Some(d) = depth {
+        if d == 0 {
+            return Err(WalGitError::config("--depth must be at least 1"));
+        }
+        cfg.storage.depth = d;
+    }
+
+    if let Some(k) = keep {
+        if k == 0 {
+            return Err(WalGitError::config("--keep must be at least 1"));
+        }
+        cfg.storage.keep = k;
+    }
+
+    if let Some(s) = sponsored {
+        cfg.storage.sponsored = s;
     }
 
     if let Some(net) = network {
@@ -140,6 +161,44 @@ pub async fn run(
             net.walrus.aggregator_url
         );
         println!("  {} {}", ui::label("epochs     "), net.walrus.epochs);
+        ui::header("storage");
+        println!(
+            "  {} {}",
+            ui::label("depth      "),
+            ui::highlight(&cfg.storage.depth.to_string())
+        );
+        println!(
+            "  {} {}",
+            ui::label("keep       "),
+            ui::highlight(&cfg.storage.keep.to_string())
+        );
+        println!(
+            "  {} {}",
+            ui::label("deletable  "),
+            if cfg.storage.deletable {
+                ui::highlight("yes")
+            } else {
+                ui::dim("no")
+            }
+        );
+        println!(
+            "  {} {}",
+            ui::label("blob owner "),
+            cfg.storage
+                .owner
+                .as_deref()
+                .map(ui::highlight)
+                .unwrap_or_else(|| ui::dim("(active address)"))
+        );
+        println!(
+            "  {} {}",
+            ui::label("sponsored  "),
+            if cfg.storage.sponsored {
+                ui::highlight("yes")
+            } else {
+                ui::dim("no")
+            }
+        );
         ui::header("display");
         println!(
             "  {} {}",

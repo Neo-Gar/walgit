@@ -45,9 +45,12 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    if !local.pushes.is_empty() {
+    if !local.live_snapshots.is_empty() {
         ui::header("local cache");
-        ui::info(format!("recorded pushes: {}", local.pushes.len()));
+        ui::info(format!(
+            "live snapshot blob(s): {}",
+            local.live_snapshots.len()
+        ));
     }
 
     Ok(())

@@ -12,6 +12,7 @@ pub mod error;
 pub mod git;
 pub mod hooks;
 pub mod memwal;
+pub mod platform;
 pub mod retry;
 pub mod seal;
 pub mod sui;
@@ -21,7 +22,7 @@ pub mod ui;
 pub mod validate;
 pub mod walrus;
 
-pub use config::{Config, LocalRepoConfig, PushRecord};
+pub use config::{Config, LocalRepoConfig, SnapshotRef};
 pub use error::{Result, WalGitError};
 pub use seal::SealClient;
 pub use sui::SuiClient;

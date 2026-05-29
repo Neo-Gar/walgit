@@ -74,7 +74,12 @@ async fn run() -> Result<()> {
         std::env::current_dir()?
     };
 
-    let config = walgit::config::load()?;
+    let mut config = walgit::config::load()?;
+    // Sponsored mode: overlay contract + endpoint params from the platform
+    // backend before deriving anything from the config.
+    walgit::platform::resolve(&mut config)
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
     let package_id = config
         .package_id()
         .map_err(|e| anyhow!("{}", e))?
@@ -344,10 +349,15 @@ async fn do_fetch(
     repo: &walgit::sui::types::RepoRecord,
     repo_dir: &PathBuf,
 ) -> Result<()> {
-    // Single-blob model: every push runs `git pack-objects --all`, so each
-    // blob already contains every reachable object — we only need one
-    // download per branch HEAD.
-    let mut blobs_to_download: Vec<(String, String)> = vec![];
+    // Each push uploads a self-contained shallow snapshot, so a branch's head
+    // blob alone reconstructs its current state — we only fetch one blob per
+    // branch (no parent-chain walk). After unpacking we set `.git/shallow` so
+    // git accepts the intentionally-truncated history.
+    //
+    // A missing head blob is EXPECTED for an inactive/archived repo (its storage
+    // was allowed to expire). We warn rather than abort, so the helper still
+    // exits cleanly; git will report what it can't check out.
+    let mut to_download: Vec<(String, String)> = vec![]; // (blob_id, git_head)
     let mut seen = std::collections::HashSet::new();
 
     for (_branch, commit_id) in &repo.branches {
@@ -359,33 +369,39 @@ async fn do_fetch(
         if blob_id.is_empty() || git_head.is_empty() {
             continue;
         }
+        // Already have this snapshot locally → nothing to fetch for this branch.
         if walgit::git::object_exists(repo_dir, &git_head) {
             continue;
         }
-        if !seen.insert(blob_id.clone()) {
-            continue;
+        if seen.insert(blob_id.clone()) {
+            to_download.push((blob_id, git_head));
         }
-        blobs_to_download.push((blob_id, git_head));
     }
 
-    if blobs_to_download.is_empty() {
+    if to_download.is_empty() {
         ui::einfo("already up to date");
         return Ok(());
     }
 
     ui::eheader("fetch");
     ui::estep(format!(
-        "fetching {} blob(s) from Walrus",
-        blobs_to_download.len()
+        "fetching {} snapshot blob(s) from Walrus",
+        to_download.len()
     ));
 
-    for (blob_id, _) in &blobs_to_download {
-        let raw = walrus.download(blob_id).await.with_context(|| {
-            format!(
-                "download {} failed — storage may have expired (push again to renew)",
-                blob_id
-            )
-        })?;
+    let mut unpacked = 0usize;
+    let mut expired: Vec<String> = vec![];
+
+    for (blob_id, git_head) in &to_download {
+        let raw = match walrus.download(blob_id).await {
+            Ok(d) => d,
+            // Missing snapshot = expired/garbage-collected. Skip with a warning
+            // instead of failing the whole clone/fetch.
+            Err(_) => {
+                expired.push(git_head[..8.min(git_head.len())].to_string());
+                continue;
+            }
+        };
 
         let data = if repo.is_private && !repo.acl_id.is_empty() {
             let active = keystore::read_active_address(config.wallet_path.as_deref())?;
@@ -414,9 +430,29 @@ async fn do_fetch(
         };
 
         walgit::git::unpack_objects(repo_dir, &data)?;
+        unpacked += 1;
     }
 
-    ui::esuccess("fetch complete");
+    // Mark shallow boundaries so git's connectivity check accepts the truncated
+    // history (commits present whose parent object is absent).
+    if unpacked > 0 {
+        if let Ok(git_dir) = walgit::git::git_dir(repo_dir) {
+            if let Ok(roots) = walgit::git::compute_shallow_roots(repo_dir) {
+                let _ = walgit::git::write_shallow(&git_dir, &roots);
+            }
+        }
+    }
+
+    if !expired.is_empty() {
+        ui::ewarn(format!(
+            "{} snapshot blob(s) expired/unavailable: {}",
+            expired.len(),
+            expired.join(", ")
+        ));
+        ui::ewarn("repo may be inactive/archived — its storage was allowed to expire");
+    }
+
+    ui::esuccess(format!("fetch complete ({} blob(s) unpacked)", unpacked));
     Ok(())
 }
 
@@ -461,9 +497,9 @@ async fn do_push(
     let git_head = walgit::git::rev_parse(repo_dir, src_ref)?;
     let message = walgit::git::get_commit_message(repo_dir, &git_head)?;
 
-    // ─── Resolve the on-chain branch head (basis for incremental packing) ──
-    // Cost-of-storage and dollar-per-push both fall by 10–100× when each push
-    // uploads only the new commits
+    // ─── Resolve the on-chain branch head ─────────────────────────────────
+    // Kept for the new Commit's `parent` pointer (the on-chain ledger stays a
+    // full chain) and for the up-to-date fast path below.
     let parent_commit_id = sui.get_repo_branch_head(&repo_cfg.id, branch).await?;
     let parent_git_head: Option<String> = match &parent_commit_id {
         Some(cid) => sui
@@ -482,33 +518,13 @@ async fn do_push(
         }
     }
 
-    // Decide packing mode.
-    //   1. Incremental — we know the on-chain tip and have its commit locally.
-    //   2. Full repack — first push to this branch, or we don't have the
-    //      on-chain commit locally (different machine? rebase?). Slow path,
-    //      but always correct.
-    let (raw_pack, mode_label) = match &parent_git_head {
-        Some(parent_sha) if walgit::git::object_exists(repo_dir, parent_sha) => {
-            let (pack, new_commits) =
-                walgit::git::pack_objects_incremental(repo_dir, &git_head, &[parent_sha.clone()])?;
-            if new_commits == 0 || pack.is_empty() {
-                ui::eheader(&format!("push  {} → already up-to-date", branch));
-                return Ok(());
-            }
-            (
-                pack,
-                format!(
-                    "incremental · {} new commit{}",
-                    new_commits,
-                    if new_commits == 1 { "" } else { "s" }
-                ),
-            )
-        }
-        _ => {
-            let pack = walgit::git::pack_objects(repo_dir)?;
-            (pack, "full pack (no incremental basis)".to_string())
-        }
-    };
+    // Build a self-contained shallow snapshot: the object closure of the last
+    // DEFAULT_SHALLOW_DEPTH commits. Each push supersedes the previous snapshot,
+    // so a clone only ever needs this one blob — expiry of older blobs can never
+    // break it. History older than the window intentionally ages out of storage.
+    let depth = config.storage.depth.max(1);
+    let raw_pack = walgit::git::pack_objects_shallow(repo_dir, &git_head, depth)?;
+    let mode_label = format!("shallow snapshot · depth {}", depth);
 
     ui::eheader(&format!(
         "push  {} → {}  [{}]",
@@ -587,7 +603,18 @@ async fn do_push(
         raw_pack
     };
 
-    let upload = walrus.upload(pack_data, repo_cfg.epochs).await?;
+    // Own the Blob object ourselves (even on a sponsored publisher) so we
+    // control its lifecycle / gc. Privacy of private repos is Seal's job, not
+    // ownership's.
+    let blob_owner = config.storage.owner.as_deref().unwrap_or(&active);
+    let upload = walrus
+        .upload(
+            pack_data,
+            repo_cfg.epochs,
+            config.storage.deletable,
+            Some(blob_owner),
+        )
+        .await?;
 
     // Parent for the new on-chain Commit object = current on-chain branch
     // head we resolved above. Same value, no second round-trip.
@@ -608,20 +635,41 @@ async fn do_push(
         )
         .await?;
 
-    // Append push history for diagnostics (cache only, not authoritative).
+    // Track the snapshot blob we own so gc can reclaim it later. Only when the
+    // publisher actually gave us a Blob object (deletable + owned); rebates have
+    // no object to delete.
     let mut updated = repo_cfg.clone();
-    updated.pushes.push(walgit::PushRecord {
-        git_head: git_head.clone(),
-        blob_id: upload.blob_id.clone(),
-        branch: branch.to_string(),
-        commit_id: commit_id.clone(),
-        epochs: repo_cfg.epochs,
-        pushed_at_secs: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    });
+    if let Some(obj_id) = upload.blob_object_id.clone() {
+        updated.live_snapshots.push(walgit::SnapshotRef {
+            blob_id: upload.blob_id.clone(),
+            blob_object_id: obj_id,
+        });
+    }
     save_repo_config(walgit_dir, &updated)?;
+
+    // Auto-gc: the new snapshot supersedes older ones, so drop our own blobs
+    // beyond the keep window — but never a current branch head. Best-effort.
+    let net_name = repo_cfg
+        .network
+        .clone()
+        .unwrap_or_else(|| config.network.clone());
+    let protected = walgit::commands::gc::protected_head_blobs(sui, &repo_cfg.id, &active).await;
+    let gc = walgit::commands::gc::gc_snapshots(
+        walgit_dir,
+        &mut updated,
+        config.storage.keep,
+        &net_name,
+        &protected,
+    );
+    if gc.deleted > 0 {
+        ui::einfo(format!("gc: removed {} superseded snapshot blob(s)", gc.deleted));
+    }
+    if gc.failed > 0 {
+        ui::ewarn(format!(
+            "gc: {} old blob(s) could not be deleted (will retry next push)",
+            gc.failed
+        ));
+    }
 
     ui::esuccess(format!(
         "pushed {} → blob {} · commit {}",

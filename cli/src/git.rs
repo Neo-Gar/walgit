@@ -233,6 +233,141 @@ pub fn pack_objects(repo_path: &Path) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Default shallow snapshot depth (most recent commits included per push).
+pub const DEFAULT_SHALLOW_DEPTH: usize = 1000;
+
+/// Default number of most-recent snapshot blobs kept alive per repo. Older
+/// snapshots are dropped; keeping a few gives rollback + redundancy headroom.
+pub const DEFAULT_KEEP_SNAPSHOTS: usize = 3;
+
+/// Pack a self-contained, depth-limited snapshot: the object closure of the
+/// newest `depth` commits reachable from `tip`. Unpacked into an empty repo
+/// alongside a matching `.git/shallow` boundary (see [`compute_shallow_roots`]),
+/// it passes git's connectivity check and checks out `tip`; history older than
+/// the window is simply absent.
+///
+/// `git rev-list --objects --max-count=<depth> <tip>` yields those commits plus
+/// every tree/blob reachable from them — including the oldest kept commit's
+/// complete tree, so that commit stands alone as a shallow root.
+pub fn pack_objects_shallow(repo_path: &Path, tip: &str, depth: usize) -> Result<Vec<u8>> {
+    let rev_list = run(
+        Command::new("git")
+            .args(["rev-list", "--objects"])
+            .arg(format!("--max-count={}", depth.max(1)))
+            .arg(tip)
+            .current_dir(repo_path),
+        "git rev-list",
+    )?;
+    ensure_ok(&rev_list, "git rev-list")?;
+
+    let objects: Vec<String> = String::from_utf8_lossy(&rev_list.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(String::from))
+        .collect();
+    if objects.is_empty() {
+        return Err(WalGitError::git(
+            "repository has no commits — make at least one commit before pushing",
+        ));
+    }
+
+    let mut child = Command::new("git")
+        .args(["pack-objects", "--stdout"])
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WalGitError::GitNotInstalled,
+            _ => WalGitError::git(format!("failed to spawn git pack-objects: {}", e)),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        for obj in &objects {
+            writeln!(stdin, "{}", obj)?;
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| WalGitError::git(format!("git pack-objects wait failed: {}", e)))?;
+    ensure_ok(&out, "git pack-objects")?;
+    Ok(out.stdout)
+}
+
+/// Shallow roots = commit objects present in the store whose parent commit is
+/// absent. After unpacking a depth-limited snapshot, these are the boundary
+/// commits that must be listed in `.git/shallow` so git stops traversing there
+/// and accepts the (intentionally) truncated history.
+///
+/// Two passes regardless of repo size: list all present commits, then read all
+/// their parent pointers in one `git log --no-walk`. A commit is a root when a
+/// parent OID isn't itself a present commit. (`--no-walk` reads only the listed
+/// commits' headers, so it tolerates the absent parents.)
+pub fn compute_shallow_roots(repo_path: &Path) -> Result<Vec<String>> {
+    let listed = run(
+        Command::new("git")
+            .args([
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objecttype) %(objectname)",
+            ])
+            .current_dir(repo_path),
+        "git cat-file --batch-all-objects",
+    )?;
+    ensure_ok(&listed, "git cat-file --batch-all-objects")?;
+
+    let listed_out = String::from_utf8_lossy(&listed.stdout);
+    let present: std::collections::HashSet<&str> = listed_out
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some("commit"), Some(oid)) => Some(oid),
+                _ => None,
+            }
+        })
+        .collect();
+    if present.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(["log", "--no-walk=unsorted", "--format=%H %P"])
+        .current_dir(repo_path);
+    for oid in &present {
+        cmd.arg(oid);
+    }
+    let out = run(&mut cmd, "git log --no-walk")?;
+    ensure_ok(&out, "git log --no-walk")?;
+
+    let mut roots = std::collections::BTreeSet::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        let Some(commit) = it.next() else { continue };
+        // Any parent that isn't a present commit makes this commit a boundary.
+        if it.any(|parent| !present.contains(parent)) {
+            roots.insert(commit.to_string());
+        }
+    }
+    Ok(roots.into_iter().collect())
+}
+
+/// Write `.git/shallow` with the given boundary commits, overwriting any
+/// existing file. Empty `roots` means full history is present, so the shallow
+/// marker is removed entirely.
+pub fn write_shallow(git_dir: &Path, roots: &[String]) -> Result<()> {
+    let path = git_dir.join("shallow");
+    if roots.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        return Ok(());
+    }
+    let mut body = roots.join("\n");
+    body.push('\n');
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
 /// Unpack a packfile into the git object store at `repo_path`.
 pub fn unpack_objects(repo_path: &Path, pack_data: &[u8]) -> Result<()> {
     let mut child = Command::new("git")

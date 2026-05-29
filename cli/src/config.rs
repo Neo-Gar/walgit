@@ -34,6 +34,59 @@ pub struct Config {
     /// Betterleaks secret scanning settings.
     #[serde(default)]
     pub betterleaks: BetterleaksConfig,
+    /// Walrus storage / snapshot lifecycle settings.
+    #[serde(default)]
+    pub storage: StorageConfig,
+}
+
+/// Snapshot + Walrus storage policy. Blobs are always owned by `owner`
+/// (default: the active address) so the user controls their own lifecycle;
+/// privacy of private repos comes from Seal encryption, not blob ownership.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StorageConfig {
+    /// Shallow snapshot depth: most-recent commits each push uploads.
+    #[serde(default = "default_shallow_depth")]
+    pub depth: usize,
+    /// Most-recent snapshot blobs to keep alive per repo; older ones are
+    /// auto-gc'd after a successful push.
+    #[serde(default = "default_keep_snapshots")]
+    pub keep: usize,
+    /// Store blobs as `deletable`, so the owner can gc / reuse them.
+    #[serde(default = "default_true")]
+    pub deletable: bool,
+    /// Sui address that receives (owns) each Walrus `Blob` object.
+    /// `None` = the active address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Using the platform's sponsored registry + publisher. Informational: the
+    /// publisher still sends the `Blob` object to `owner`, so ownership and gc
+    /// are unchanged whether sponsored or standalone.
+    #[serde(default)]
+    pub sponsored: bool,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            depth: default_shallow_depth(),
+            keep: default_keep_snapshots(),
+            deletable: true,
+            owner: None,
+            sponsored: false,
+        }
+    }
+}
+
+fn default_shallow_depth() -> usize {
+    crate::git::DEFAULT_SHALLOW_DEPTH
+}
+
+fn default_keep_snapshots() -> usize {
+    crate::git::DEFAULT_KEEP_SNAPSHOTS
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -173,6 +226,7 @@ impl Default for Config {
             display: DisplayConfig::default(),
             memwal: None,
             betterleaks: BetterleaksConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -189,7 +243,8 @@ impl NetworkConfig {
             walrus: WalrusConfig {
                 publisher_url: "https://publisher.walrus-testnet.walrus.space".to_string(),
                 aggregator_url: "https://aggregator.walrus-testnet.walrus.space".to_string(),
-                epochs: 1,
+                // Testnet epochs are short (~1 day), so keep more of them.
+                epochs: 30,
             },
             seal: SealConfig {
                 key_server_id:
@@ -211,7 +266,8 @@ impl NetworkConfig {
             walrus: WalrusConfig {
                 publisher_url: "https://publisher.walrus.space".to_string(),
                 aggregator_url: "https://aggregator.walrus.space".to_string(),
-                epochs: 1,
+                // Mainnet epochs are ~2 weeks each; 4 ≈ two months of retention.
+                epochs: 4,
             },
             seal: SealConfig {
                 key_server_id: String::new(),
@@ -340,9 +396,10 @@ pub struct LocalRepoConfig {
     /// Walrus storage epochs chosen at `walgit init` time.
     #[serde(default = "default_epochs")]
     pub epochs: u32,
-    /// History of all local pushes (newest last).
+    /// Snapshot blobs we own and haven't gc'd yet (newest last). Bounded by gc
+    /// to ~`keep` entries; the authoritative history is the on-chain chain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pushes: Vec<PushRecord>,
+    pub live_snapshots: Vec<SnapshotRef>,
     /// Sui object ID of the original repository this repo was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
@@ -351,20 +408,13 @@ pub struct LocalRepoConfig {
     pub forked_from_acl_id: Option<String>,
 }
 
+/// A snapshot blob we uploaded and own. `blob_id` is the Walrus content id
+/// (matched against on-chain branch heads to avoid deleting a live head);
+/// `blob_object_id` is the Sui `Blob` object id passed to `walrus delete`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PushRecord {
-    pub git_head: String,
+pub struct SnapshotRef {
     pub blob_id: String,
-    pub branch: String,
-    /// Sui Commit object ID created by this push.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub commit_id: String,
-    /// Walrus epochs this blob was stored for.
-    #[serde(default = "default_epochs")]
-    pub epochs: u32,
-    /// Unix timestamp (seconds) at push time — used to estimate storage expiry.
-    #[serde(default)]
-    pub pushed_at_secs: u64,
+    pub blob_object_id: String,
 }
 
 pub fn load_repo_config(walgit_dir: &Path) -> Result<LocalRepoConfig> {

@@ -133,7 +133,7 @@ pub async fn run(name: String, here: bool, private: bool, epochs: Option<u32>) -
         network: Some(ctx.config.network.clone()),
         private,
         epochs,
-        pushes: vec![],
+        live_snapshots: vec![],
         forked_from: None,
         forked_from_acl_id: None,
     };

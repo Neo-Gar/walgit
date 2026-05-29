@@ -34,6 +34,8 @@ struct NewlyCreated {
 
 #[derive(Deserialize, Debug)]
 struct BlobObject {
+    /// Sui object ID of the on-chain `Blob` (distinct from the content blobId).
+    id: Option<String>,
     #[serde(rename = "blobId")]
     blob_id: String,
 }
@@ -46,6 +48,9 @@ struct AlreadyCertified {
 
 pub struct UploadResult {
     pub blob_id: String,
+    /// Sui object ID of the `Blob` object, when the publisher created and
+    /// transferred one to us (deletable + send_object_to). `None` on rebate.
+    pub blob_object_id: Option<String>,
     /// True when Walrus already had this exact content — no storage charge.
     pub rebate: bool,
 }
@@ -73,11 +78,27 @@ impl WalrusClient {
         }
     }
 
-    /// Upload binary data to Walrus for `epochs` storage epochs.
-    /// Returns `UploadResult { blob_id, rebate }`.
-    pub async fn upload(&self, data: Vec<u8>, epochs: u32) -> Result<UploadResult> {
+    /// Upload binary data to Walrus for `epochs` storage epochs. When
+    /// `deletable` is set the blob can later be deleted by its owner; when
+    /// `send_object_to` is given the publisher transfers the `Blob` object to
+    /// that Sui address (so the user owns + controls it even on a sponsored
+    /// publisher).
+    pub async fn upload(
+        &self,
+        data: Vec<u8>,
+        epochs: u32,
+        deletable: bool,
+        send_object_to: Option<&str>,
+    ) -> Result<UploadResult> {
         let size = data.len();
-        let url = format!("{}/v1/blobs?epochs={}", self.publisher_url, epochs);
+        let mut url = format!("{}/v1/blobs?epochs={}", self.publisher_url, epochs);
+        if deletable {
+            url.push_str("&deletable=true");
+        }
+        if let Some(addr) = send_object_to {
+            url.push_str("&send_object_to=");
+            url.push_str(addr);
+        }
 
         let pb = ui::spinner(format!(
             "Uploading {} to Walrus ({} epoch{})…",
@@ -156,11 +177,13 @@ async fn perform_upload(http: &Client, url: &str, data: &[u8]) -> Result<UploadR
     if let Some(newly) = parsed.newly_created {
         Ok(UploadResult {
             blob_id: newly.blob_object.blob_id,
+            blob_object_id: newly.blob_object.id,
             rebate: false,
         })
     } else if let Some(cert) = parsed.already_certified {
         Ok(UploadResult {
             blob_id: cert.blob_id,
+            blob_object_id: None,
             rebate: true,
         })
     } else {

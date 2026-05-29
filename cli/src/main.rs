@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
         cli.command,
         Command::Config { .. }
             | Command::Cache { .. }
+            | Command::Gc { .. }
             | Command::Trace { .. }
             | Command::Memwal { .. }
     ) {
@@ -229,6 +230,7 @@ async fn main() -> Result<()> {
                 walgit::commands::cache::clean(repo_id, all).await?
             }
         },
+        Command::Gc { keep } => walgit::commands::gc::run(keep).await?,
         Command::Pr { action } => match action {
             PrAction::Create {
                 source_branch,
@@ -253,6 +255,9 @@ async fn main() -> Result<()> {
             short_ids,
             full_ids,
             betterleaks,
+            depth,
+            keep,
+            sponsored,
             show,
         } => {
             let short_pref = if short_ids {
@@ -283,6 +288,9 @@ async fn main() -> Result<()> {
                 epochs,
                 short_pref,
                 betterleaks_skip_pref,
+                depth,
+                keep,
+                sponsored,
                 show,
             )
             .await?

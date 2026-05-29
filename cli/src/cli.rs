@@ -94,6 +94,14 @@ pub enum Command {
         action: CacheAction,
     },
 
+    /// Delete this repo's snapshot blobs older than the keep window
+    /// (best-effort; only blobs you own). Runs automatically after each push.
+    Gc {
+        /// Override how many recent snapshots to keep.
+        #[arg(long)]
+        keep: Option<usize>,
+    },
+
     /// Read or modify walgit configuration.
     Config {
         #[arg(long)]
@@ -119,6 +127,16 @@ pub enum Command {
         /// Enable or disable betterleaks secret scanning. Values: enable, disable.
         #[arg(long, value_name = "enable|disable")]
         betterleaks: Option<String>,
+        /// Shallow snapshot depth: most-recent commits each push uploads.
+        #[arg(long, value_name = "N")]
+        depth: Option<usize>,
+        /// How many recent snapshot blobs to keep alive per repo.
+        #[arg(long, value_name = "N")]
+        keep: Option<usize>,
+        /// Use the WalGit platform: fetch contract/registry + endpoints from the
+        /// backend instead of local config.
+        #[arg(long, value_name = "true|false")]
+        sponsored: Option<bool>,
         #[arg(long)]
         show: bool,
     },

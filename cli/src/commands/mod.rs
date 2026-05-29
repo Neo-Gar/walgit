@@ -6,6 +6,7 @@ pub mod agent;
 pub mod cache;
 pub mod config_cmd;
 pub mod fork;
+pub mod gc;
 pub mod init;
 pub mod log;
 pub mod memwal_cmd;
@@ -35,7 +36,10 @@ pub struct CommandContext {
 
 impl CommandContext {
     pub async fn load() -> Result<Self> {
-        let config = crate::config::load()?;
+        let mut config = crate::config::load()?;
+        // In sponsored mode, contract + endpoint params come from the platform
+        // backend (overriding local config).
+        crate::platform::resolve(&mut config).await?;
         let net = config.active_network()?.clone();
         let package_id = config.package_id()?.to_string();
         let registry_id = config.registry_id()?.to_string();
@@ -83,8 +87,12 @@ pub fn preflight() -> Result<()> {
 
     let config = crate::config::load()?;
     let _ = config.active_network()?;
-    let _ = config.package_id()?;
-    let _ = config.registry_id()?;
+    // In sponsored mode the package/registry are fetched from the backend at
+    // command time (CommandContext::load), so they need not be set locally.
+    if !config.storage.sponsored {
+        let _ = config.package_id()?;
+        let _ = config.registry_id()?;
+    }
     let _ = keystore::read_active_address(config.wallet_path.as_deref())?;
     Ok(())
 }

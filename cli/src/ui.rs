@@ -155,6 +155,14 @@ pub fn estep(msg: impl AsRef<str>) {
     eprintln!("  {} {}", style("→").cyan().bold(), msg.as_ref());
 }
 
+pub fn ewarn(msg: impl AsRef<str>) {
+    eprintln!(
+        "  {} {}",
+        style("!").yellow().bold(),
+        style(msg.as_ref()).yellow()
+    );
+}
+
 pub fn label(s: &str) -> String {
     format!("{}", style(s).cyan())
 }

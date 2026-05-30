@@ -6,6 +6,7 @@ use crate::error::{Result, WalGitError};
 use crate::trace::ToolCall;
 use crate::trace_pending::{self, PendingTrace};
 use serde_json::Value;
+use std::path::Path;
 
 pub enum RecordKind {
     /// Explicit tool call from an autonomous agent.
@@ -72,12 +73,136 @@ pub async fn record(kind: RecordKind, only_if_enabled: bool) -> Result<()> {
                 output_summary: output,
             });
         }
+        // `Stop` is special: it's where a session becomes a memory, so it owns
+        // its own persistence (finalize / ask-for-summary / discard) and
+        // returns directly instead of falling through to the plain save below.
+        RecordKind::ClaudeHook {
+            event: ClaudeEvent::Stop,
+        } => {
+            return handle_stop(&git_dir, pt, &payload);
+        }
         RecordKind::ClaudeHook { event } => {
             apply_claude_event(&mut pt, event, &payload);
         }
     }
 
     trace_pending::save(&git_dir, &pt)?;
+    Ok(())
+}
+
+/// Handle Claude Code's `Stop` hook — the agent has finished its turn.
+///
+/// This is the moment a session crystallises into a stored memory. The states:
+///
+/// 1. **Read-only** (no edits, no commits) → discard the pending trace and
+///    write nothing. Keeps MemWal free of "agent just looked around" entries.
+/// 2. **Changed but not committed yet** → keep the pending trace alive so the
+///    work folds into the eventual commit; there's no SHA to key a memory on.
+/// 3. **Committed, no decision yet, first Stop** → ask the running agent to
+///    summarise by emitting a `decision: block` control object. Claude feeds
+///    the `reason` back as a prompt and the agent calls `walgit trace set
+///    --decision …`, after which it stops again.
+/// 4. **Committed, decision present OR we already asked (`stop_hook_active`)**
+///    → finalize: write one compact session snapshot and clear the pending
+///    trace. The `stop_hook_active` guard guarantees we never loop forever even
+///    if the agent ignores the request.
+fn handle_stop(git_dir: &Path, mut pt: PendingTrace, payload: &Value) -> Result<()> {
+    if !pt.has_changes() {
+        trace_pending::delete(git_dir)?;
+        return Ok(());
+    }
+    if pt.commits.is_empty() {
+        // Edited but not committed — persist as-is and wait for the commit.
+        trace_pending::save(git_dir, &pt)?;
+        return Ok(());
+    }
+
+    let stop_active = payload
+        .get("stop_hook_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if pt.decision.trim().is_empty() && !stop_active {
+        // Ask the agent to write its own summary; leave pending untouched so
+        // the agent's `trace set --decision` fills it before the next Stop.
+        emit_summary_request();
+        return Ok(());
+    }
+
+    finalize_session(git_dir, &mut pt)
+}
+
+/// Emit the Stop-hook control object that asks the agent to summarise its work.
+///
+/// Claude Code reads a Stop hook's stdout as a JSON control object; `decision:
+/// block` prevents the agent from stopping and surfaces `reason` to it as a new
+/// prompt. We use that one round-trip to have the agent — which still holds the
+/// full session context — write a concise, genuine "what & why" into the trace.
+fn emit_summary_request() {
+    let reason = "Before you finish: record a short reasoning trace for this \
+        repository's memory. Run `walgit trace set --decision \"<what you \
+        changed and WHY, 2-3 sentences>\"` (add one or more `--alternative \
+        \"<option you rejected and why>\"` if there were real forks). Keep the \
+        decision under ~300 characters — summarise the intent, don't relist \
+        every step.";
+    let control = serde_json::json!({
+        "decision": "block",
+        "reason": reason,
+    });
+    // A single line of JSON on stdout is the hook's control channel.
+    println!("{}", control);
+}
+
+/// Write the compact, MemWal-bound session record and clear the pending trace.
+///
+/// The snapshot is keyed by the session's last commit SHA so the existing
+/// push-time uploader (which enumerates pushed commits) ships it unchanged. We
+/// drop `tools_called` here — only the derived `files` list survives — so
+/// neither the local snapshot nor MemWal carries the bulky per-call log.
+pub(super) fn finalize_session(git_dir: &Path, pt: &mut PendingTrace) -> Result<()> {
+    let Some(sha) = pt.commits.last().cloned() else {
+        return Ok(()); // defensive: callers only finalize committed sessions
+    };
+
+    // Fill the task from the commit message if the agent never set one.
+    if pt.task.trim().is_empty() {
+        if let Some(hint) = super::memwal::derive_task_hint(pt) {
+            pt.task = hint;
+        }
+    }
+    // Derive the durable file list, then drop the bulky tool log.
+    pt.files = super::memwal::files_modified(pt);
+    pt.tools_called.clear();
+
+    // Betterleaks gate before anything reaches disk. Same policy the old
+    // post-commit snapshot used: this hook is non-interactive, so we warn and
+    // refuse to save rather than blocking. Push-time scanning runs again.
+    if !crate::betterleaks::is_skipped() {
+        let text = super::memwal::format_for_memwal(&sha, pt);
+        match crate::betterleaks::scan_text(&text) {
+            crate::betterleaks::ScanOutcome::SecretsFound { output } => {
+                eprintln!(
+                    "  ! betterleaks: secrets detected in trace for {} — snapshot NOT saved",
+                    sha
+                );
+                for line in output.lines() {
+                    eprintln!("  {}", line);
+                }
+                // Discard so a secret never lingers in the pending file either.
+                trace_pending::delete(git_dir)?;
+                return Ok(());
+            }
+            crate::betterleaks::ScanOutcome::Unavailable => {
+                eprintln!(
+                    "  ! betterleaks not installed — trace saved without secret scan \
+                     (re-checked at push time)"
+                );
+            }
+            crate::betterleaks::ScanOutcome::Clean => {}
+        }
+    }
+
+    trace_pending::save_snapshot(git_dir, &sha, pt)?;
+    trace_pending::delete(git_dir)?;
     Ok(())
 }
 
@@ -107,9 +232,8 @@ pub(super) fn apply_claude_event(pt: &mut PendingTrace, event: ClaudeEvent, payl
             });
         }
         ClaudeEvent::Stop => {
-            // No semantic action for now: pending trace stays as-is until the
-            // next commit triggers flush. Future: optional LLM summarisation
-            // here to fill `decision` from the transcript.
+            // Unreachable in practice: `record` intercepts Stop and routes it
+            // to `handle_stop`. Kept only for match exhaustiveness.
         }
     }
 }

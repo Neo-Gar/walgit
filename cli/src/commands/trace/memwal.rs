@@ -407,29 +407,34 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-/// Strip `git -C /some/absolute/path ` prefixes from every `&&`-chained
-/// segment. E.g. `git -C /abs add f && git -C /abs commit -m "msg"` →
-/// `git add f && git commit -m "msg"`.
-fn strip_git_dash_c(cmd: &str) -> String {
-    cmd.split("&&")
-        .map(|seg| strip_one_git_dash_c(seg.trim()))
-        .collect::<Vec<_>>()
-        .join(" && ")
-}
-
-fn strip_one_git_dash_c(seg: &str) -> String {
-    if let Some(rest) = seg.strip_prefix("git -C ") {
-        if let Some(space) = rest.find(' ') {
-            let path_candidate = &rest[..space];
-            if path_candidate.starts_with('/') {
-                return format!("git {}", rest[space + 1..].trim());
-            }
-        }
-    }
-    seg.to_string()
+/// Basenames of the files a session touched, derived from its Read/Write/Edit
+/// tool calls. Deduplicated, order-preserving, absolute paths reduced to their
+/// final component so they don't add noise to the embedding. Computed once at
+/// finalize and stored on the snapshot so the payload survives dropping the
+/// raw `tools_called` log.
+pub(super) fn files_modified(pt: &PendingTrace) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    pt.tools_called
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.name.as_str(),
+                "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+            )
+        })
+        .map(|t| basename(t.input_summary.trim()))
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
 }
 
 /// Build the human-readable block that gets embedded by MemWal.
+///
+/// Deliberately lean: the agent's own `decision` summary is the heart of the
+/// memory, alongside the task and the files touched. We do NOT emit the raw
+/// tool list or the bash command log — those bloat the embedding with noise and
+/// would fill the user's MemWal namespace. The full per-call detail never
+/// leaves the ephemeral pending file.
 fn natural_language_block(commit_sha: &str, pt: &PendingTrace) -> String {
     let mut lines = vec![
         format!("{}{}", MEMWAL_HEADER_PREFIX, commit_sha),
@@ -444,47 +449,15 @@ fn natural_language_block(commit_sha: &str, pt: &PendingTrace) -> String {
         lines.push(format!("task: {}", hint));
     }
 
-    // Files touched by Edit/Write/Read operations. Use only the final
-    // component of the path so absolute paths don't add noise to embeddings.
-    let files: Vec<String> = pt
-        .tools_called
-        .iter()
-        .filter(|t| {
-            matches!(
-                t.name.as_str(),
-                "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
-            )
-        })
-        .map(|t| basename(t.input_summary.trim()))
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Files: prefer the list finalized onto the snapshot; fall back to deriving
+    // from tool calls for older snapshots written before `files` existed.
+    let files = if pt.files.is_empty() {
+        files_modified(pt)
+    } else {
+        pt.files.clone()
+    };
     if !files.is_empty() {
         lines.push(format!("files modified: {}", files.join(", ")));
-    }
-
-    // Bash commands — strip `git -C /absolute/path` prefixes so the actual
-    // intent (e.g. "git add test.txt") is what the embedding model sees.
-    let cmds: Vec<String> = pt
-        .tools_called
-        .iter()
-        .filter(|t| t.name == "Bash")
-        .map(|t| strip_git_dash_c(t.input_summary.trim()))
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !cmds.is_empty() {
-        lines.push(format!("commands: {}", cmds.join("; ")));
-    }
-
-    // Deduplicated list of tools (order-preserving).
-    if !pt.tools_called.is_empty() {
-        let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&str> = pt
-            .tools_called
-            .iter()
-            .map(|t| t.name.as_str())
-            .filter(|&n| seen.insert(n))
-            .collect();
-        lines.push(format!("tools used: {}", unique.join(", ")));
     }
 
     if !pt.decision.trim().is_empty() {
@@ -497,6 +470,19 @@ fn natural_language_block(commit_sha: &str, pt: &PendingTrace) -> String {
         ));
     }
 
+    // Other commits made in the same session (the header carries the primary).
+    if pt.commits.len() > 1 {
+        let others: Vec<String> = pt
+            .commits
+            .iter()
+            .filter(|s| s.as_str() != commit_sha)
+            .map(|s| s.chars().take(8).collect::<String>())
+            .collect();
+        if !others.is_empty() {
+            lines.push(format!("also in session: {}", others.join(", ")));
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -506,7 +492,7 @@ fn natural_language_block(commit_sha: &str, pt: &PendingTrace) -> String {
 /// Handles two patterns from Claude Code commits:
 /// - Inline:  `git commit -m "fix the bug"`
 /// - Heredoc: `git commit -m "$(cat <<'EOF'\nfix the bug\n\nCo-Authored-By…\nEOF\n)"`
-fn derive_task_hint(pt: &PendingTrace) -> Option<String> {
+pub(super) fn derive_task_hint(pt: &PendingTrace) -> Option<String> {
     for tc in &pt.tools_called {
         if tc.name != "Bash" {
             continue;
@@ -605,20 +591,40 @@ mod tests {
     }
 
     #[test]
-    fn strip_git_dash_c_chained() {
-        let cmd = "git -C /abs/path add test.txt && git -C /abs/path commit -m \"msg\"";
-        let result = strip_git_dash_c(cmd);
-        assert_eq!(result, "git add test.txt && git commit -m \"msg\"");
-    }
-
-    #[test]
     fn format_for_memwal_no_json() {
         let pt = make_pt_with_bash("git -C /abs/path add test.txt && git -C /abs/path commit -m \"$(cat <<'EOF'\nadd test file\nEOF\n)\"");
         let text = format_for_memwal("abc123", &pt);
         assert!(!text.contains("---json---"), "should not contain JSON separator");
         assert!(!text.contains('{'), "should not contain raw JSON");
+        // Task is derived from the commit message even when never set explicitly.
         assert!(text.contains("task: add test file"));
-        assert!(text.contains("git add test.txt"));
+        // The lean payload no longer dumps the command/tool log.
+        assert!(!text.contains("commands:"));
+        assert!(!text.contains("tools used:"));
+    }
+
+    #[test]
+    fn format_for_memwal_uses_finalized_files_and_decision() {
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.task = "rework trace lifecycle".into();
+        pt.decision = "moved finalize to Stop so summaries land before upload".into();
+        pt.files = vec!["record.rs".into(), "memwal.rs".into()];
+        let text = format_for_memwal("deadbeef", &pt);
+        assert!(text.contains("files modified: record.rs, memwal.rs"));
+        assert!(text.contains("decision: moved finalize to Stop"));
+    }
+
+    #[test]
+    fn files_modified_dedupes_basenames() {
+        let mut pt = PendingTrace::new("a".into(), "r".into(), None);
+        for f in ["/abs/src/lib.rs", "lib.rs", "/other/mod.rs"] {
+            pt.tools_called.push(ToolCall {
+                name: "Edit".into(),
+                input_summary: f.into(),
+                output_summary: "ok".into(),
+            });
+        }
+        assert_eq!(files_modified(&pt), vec!["lib.rs", "mod.rs"]);
     }
 }
 

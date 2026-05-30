@@ -2,21 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pending reasoning trace — an in-progress accumulator that lives inside
-//! `.git/walgit/pending-trace.json` between `walgit trace start` and the next
-//! commit. Agent hooks (Claude Code, Codex, …) append tool calls and decision
-//! fields here as the session progresses; `walgit trace flush` (invoked by the
-//! `prepare-commit-msg` git hook) consumes it into the commit message footer.
+//! `.git/walgit/pending-trace.json` for the duration of one agent session.
+//! Agent hooks (Claude Code, Codex, …) append tool calls here as the session
+//! progresses, and the `post-commit` git hook records each commit's SHA into
+//! `commits`. The unit of memory is the *session*, not the commit: the pending
+//! trace survives across multiple commits and is finalized only when the agent
+//! ends its turn (Claude Code's `Stop` hook → [`crate::commands::trace`]).
+//!
+//! At finalize, the agent's own one-paragraph `decision` summary is folded in,
+//! the bulky `tools_called` log is reduced to a derived `files` list and
+//! dropped, and a single compact `traces/<last-commit-sha>.json` snapshot is
+//! written for push-time upload to MemWal. Sessions that changed nothing
+//! (read-only) are discarded without persisting anything, keeping the user's
+//! MemWal namespace free of noise.
 //!
 //! Design notes:
 //!
-//! - Required fields (`task`, `decision`) may be empty during the session and
-//!   are only enforced at flush time, with a permissive fallback so a missing
-//!   decision never blocks the user's commit — it surfaces as a warning and a
-//!   placeholder. This keeps the system out of the user's way.
+//! - All fields may be empty during the session; nothing is enforced — a
+//!   missing decision degrades to a task/files-only memory rather than blocking.
 //! - Writes are atomic (`write tmp → rename`) so a crashed hook never leaves a
 //!   half-written file that breaks the next read.
 //! - File format is JSON; the on-disk shape is intentionally close to
-//!   [`crate::trace::Trace`] so flushing is a near-identity transform.
+//!   [`crate::trace::Trace`].
 
 use crate::error::{Result, WalGitError};
 use crate::trace::{ToolCall, Trace};
@@ -56,6 +63,20 @@ pub struct PendingTrace {
     /// `walgit trace status` so users can spot stale pending traces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
+
+    /// Commits produced during this session, in order. Filled by the
+    /// `post-commit` hook (via [`mark_commit`](PendingTrace::mark_commit)).
+    /// The finalized session snapshot is keyed by the last entry; the rest are
+    /// recorded as "also in session" context for recall.
+    #[serde(default)]
+    pub commits: Vec<String>,
+
+    /// Basenames of files the session touched, computed once at finalize from
+    /// `tools_called`. Storing the derived list lets us drop the bulky
+    /// `tools_called` log from the on-disk snapshot (and from MemWal) while
+    /// still surfacing "files modified" for search.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 fn default_version() -> String {
@@ -77,7 +98,30 @@ impl PendingTrace {
             extensions: Value::Null,
             source,
             started_at: Some(chrono::Utc::now().timestamp()),
+            commits: Vec::new(),
+            files: Vec::new(),
         }
+    }
+
+    /// Record a commit SHA produced during this session. Idempotent: a repeated
+    /// HEAD (e.g. `--amend` firing post-commit twice) is not double-counted.
+    pub fn mark_commit(&mut self, sha: String) {
+        if !self.commits.contains(&sha) {
+            self.commits.push(sha);
+        }
+    }
+
+    /// True if the session actually changed the repo — it edited a file or
+    /// produced a commit. Read-only sessions (only Read/Grep/Bash that didn't
+    /// commit) return false and are never persisted, keeping MemWal free of
+    /// "the agent just looked around" noise.
+    pub fn has_changes(&self) -> bool {
+        if !self.commits.is_empty() {
+            return true;
+        }
+        self.tools_called
+            .iter()
+            .any(|t| matches!(t.name.as_str(), "Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
     }
 
     /// Convert into a strict [`Trace`]. Used at flush time. Fills sensible

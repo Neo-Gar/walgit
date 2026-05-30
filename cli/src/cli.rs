@@ -306,12 +306,13 @@ pub enum TraceAction {
     /// Discard the pending trace (archives it to `last-trace.json`).
     Abort,
 
-    /// Internal: called by the `post-commit` git hook to snapshot the pending
-    /// trace as `<git-dir>/walgit/traces/<HEAD-sha>.json`. Safe to call
-    /// manually if you want to retroactively associate the current pending
+    /// Internal: called by the `post-commit` git hook to record the new
+    /// commit's SHA into the live pending trace. The trace itself is finalized
+    /// into `<git-dir>/walgit/traces/<sha>.json` later, when the agent's
+    /// session ends. Safe to call manually to associate the current pending
     /// trace with the freshly-created commit.
     Snapshot {
-        /// Override the commit SHA to write under. Defaults to HEAD.
+        /// Override the commit SHA to record. Defaults to HEAD.
         #[arg(long)]
         commit: Option<String>,
     },

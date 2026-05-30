@@ -1,15 +1,22 @@
 // Copyright (c) 2026 Nikita Vatletsov
 // SPDX-License-Identifier: Apache-2.0
 
-//! `walgit trace` — record, inspect, diff, and flush reasoning traces.
+//! `walgit trace` — record, inspect, diff, and finalize reasoning traces.
+//!
+//! The unit of memory is one **agent session**, not one commit. A session's
+//! pending trace accumulates across however many commits the agent makes and is
+//! finalized into a single compact snapshot when the agent ends its turn.
 //!
 //! Two operating modes:
 //!
 //! - **Manual** (autonomous agents driving walgit directly): `start`, `record`
-//!   tool calls explicitly, `set` decision fields, then `git commit` triggers
-//!   the prepare-commit-msg hook which calls `flush`.
+//!   tool calls explicitly, `set` the decision summary. The `post-commit` hook
+//!   records commit SHAs; finalize the session by `set`-ting a decision and
+//!   letting the next `start` roll it up, or rely on the adapter `Stop` path.
 //! - **Adapter** (Claude Code today, more later): `--from-claude-hook` flags
-//!   read hook JSON from stdin and translate it into the same accumulator.
+//!   read hook JSON from stdin. On `Stop`, walgit asks the agent — which still
+//!   holds full context — to write its own `decision`, then finalizes the
+//!   session into `traces/<sha>.json`. See [`record`].
 //!
 //! `install` / `uninstall` wire up the git hook and the per-agent hook files
 //! so the manual or adapter mode actually fires automatically. Without
@@ -95,8 +102,15 @@ pub async fn start(opts: StartOpts) -> Result<()> {
                 existing.run_id
             )));
         }
-        // Different run: archive the prior trace so it isn't silently lost.
-        let _ = trace_pending::consume(&git_dir)?;
+        // Different run. If the prior session already produced a commit but
+        // never reached its `Stop` (e.g. the agent was killed mid-session),
+        // finalize it now so its memory isn't lost. Otherwise just archive it.
+        let mut existing = existing;
+        if !existing.commits.is_empty() {
+            let _ = record::finalize_session(&git_dir, &mut existing);
+        } else {
+            let _ = trace_pending::consume(&git_dir)?;
+        }
     }
 
     let mut pt = trace_pending::PendingTrace::new(agent_id, run_id, source);
@@ -128,6 +142,22 @@ pub struct SetOpts {
     pub parent_run_id: Option<String>,
 }
 
+/// Hard cap on the persisted `decision` length. Keeps a single session's MemWal
+/// entry small even if an agent writes far more than the requested ~300 chars.
+const DECISION_CAP: usize = 500;
+/// Hard cap on each `alternative` entry.
+const ALTERNATIVE_CAP: usize = 200;
+
+/// Truncate to `max` characters, appending an ellipsis when it had to cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 pub async fn set(opts: SetOpts) -> Result<()> {
     let git_dir = helpers::current_git_dir()?;
     let mut pt = trace_pending::load(&git_dir)?
@@ -136,10 +166,13 @@ pub async fn set(opts: SetOpts) -> Result<()> {
         pt.task = t;
     }
     if let Some(d) = opts.decision {
-        pt.decision = d;
+        // Cap the decision so a verbose agent can't bloat the per-session MemWal
+        // entry. The agent is asked for ≤300 chars; we keep a little headroom.
+        pt.decision = truncate(d.trim(), DECISION_CAP);
     }
     for alt in opts.alternative {
-        pt.alternatives_considered.push(alt);
+        pt.alternatives_considered
+            .push(truncate(alt.trim(), ALTERNATIVE_CAP));
     }
     if let Some(c) = opts.confidence {
         pt.confidence = Some(c);
@@ -212,6 +245,19 @@ pub async fn status() -> Result<()> {
     }
     println!(
         "  {}: {}",
+        ui::label("commits      "),
+        if pt.commits.is_empty() {
+            ui::dim("(none yet)")
+        } else {
+            pt.commits
+                .iter()
+                .map(|s| ui::short_hash(s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "  {}: {}",
         ui::label("decision     "),
         if pt.decision.is_empty() {
             ui::dim("(empty)")
@@ -244,14 +290,22 @@ pub async fn status() -> Result<()> {
 
 // ─── snapshot (called by post-commit hook) ──────────────────────────────────
 
-/// Move the pending trace to `traces/<commit_sha>.json`. Default commit is
-/// `HEAD` (the freshly-created one when invoked from a post-commit hook).
+/// Record a new commit's SHA into the live pending trace. Invoked by the
+/// `post-commit` git hook after every commit; the default SHA is `HEAD` (the
+/// commit just created).
 ///
-/// Silently no-ops when there's no pending trace, so the hook never causes
-/// `git commit` to fail and never produces stderr noise on plain commits.
+/// Note the lifecycle change: the pending trace is **not** consumed here.
+/// A session spans potentially several commits and only finalises at the
+/// agent's `Stop` (see [`record::finalize_session`]), where the agent's own
+/// summary is folded in and one compact `traces/<sha>.json` snapshot is written
+/// — keyed by the session's last commit. This keeps the unit of memory the
+/// *session*, not the individual commit.
+///
+/// Silently no-ops when there's no pending trace, so plain `git commit` (no
+/// agent session) never fails or prints noise.
 pub async fn snapshot(commit_sha: Option<String>) -> Result<()> {
     let git_dir = helpers::current_git_dir()?;
-    let Some(pt) = trace_pending::load(&git_dir)? else {
+    let Some(mut pt) = trace_pending::load(&git_dir)? else {
         return Ok(());
     };
 
@@ -263,50 +317,7 @@ pub async fn snapshot(commit_sha: Option<String>) -> Result<()> {
         }
     };
 
-    // ── Betterleaks scan before the trace reaches disk ────────────────────
-    // This is the earliest gate: catches secrets in the `task` field (user's
-    // original prompt) and `decision`/`alternatives` before the snapshot is
-    // written. Runs in a post-commit hook so we cannot show an interactive
-    // prompt — we warn and refuse to save rather than blocking the commit.
-    if !crate::betterleaks::is_skipped() {
-        let text = crate::commands::trace::format_for_memwal(&sha, &pt);
-        match crate::betterleaks::scan_text(&text) {
-            crate::betterleaks::ScanOutcome::SecretsFound { output } => {
-                // Print to stderr — the hook now lets stderr through.
-                eprintln!();
-                eprintln!("  ╔═══════════════════════════════════════════════════════════════╗");
-                eprintln!("  ║  ⚠  BETTERLEAKS: SECRETS DETECTED IN TRACE — NOT SAVED  ⚠   ║");
-                eprintln!("  ╠═══════════════════════════════════════════════════════════════╣");
-                eprintln!("  ║  The reasoning trace for this commit contains a secret.       ║");
-                eprintln!("  ║  The snapshot was NOT saved — the trace will not be uploaded  ║");
-                eprintln!("  ║  to MemWal. Run `walgit trace abort` to discard the trace.   ║");
-                eprintln!("  ╚═══════════════════════════════════════════════════════════════╝");
-                eprintln!();
-                for line in output.lines() {
-                    eprintln!("  {}", line);
-                }
-                eprintln!();
-                // Return Ok so the commit itself is not rolled back.
-                return Ok(());
-            }
-            crate::betterleaks::ScanOutcome::Unavailable => {
-                // Non-interactive context: warn but save anyway.
-                // The push-time gate will ask for confirmation before MemWal upload.
-                eprintln!(
-                    "  ! betterleaks not installed — trace saved without secret scan \
-                     (secrets will be checked again at push time)"
-                );
-            }
-            crate::betterleaks::ScanOutcome::Clean => {}
-        }
-    }
-
-    let path = trace_pending::save_snapshot(&git_dir, &sha, &pt)?;
-    let _ = trace_pending::consume(&git_dir)?;
-    ui::success(format!(
-        "snapshot: {} → {}",
-        ui::short_hash(&sha),
-        ui::dim(&path.display().to_string())
-    ));
+    pt.mark_commit(sha);
+    trace_pending::save(&git_dir, &pt)?;
     Ok(())
 }

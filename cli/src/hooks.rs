@@ -46,8 +46,9 @@ pub const CLAUDE_HOOK_TAG_LEGACY: &str = "walgit-trace-managed";
 
 /// Body of the `post-commit` hook. Runs after `git commit` succeeds, so
 /// `HEAD` already points at the freshly-created commit. `walgit trace
-/// snapshot` reads the pending-trace accumulator and saves it under
-/// `traces/<HEAD-sha>.json` for later upload to MemWal at push time.
+/// snapshot` records that SHA into the live pending-trace accumulator; the
+/// trace is finalized into `traces/<sha>.json` only when the agent's session
+/// ends, keeping the unit of memory the session rather than the commit.
 ///
 /// Why `post-commit` instead of `prepare-commit-msg`: with MemWal as the
 /// authoritative trace store, we don't write into the commit message
@@ -58,8 +59,10 @@ fn post_commit_body() -> String {
     format!(
         r#"{begin}
 {sentinel}
-# Snapshots the pending reasoning trace (if any) into <git-dir>/walgit/traces/<sha>.json.
-# Exits 0 silently when there's no pending trace, so plain `git commit` keeps working.
+# Records this commit's SHA into the pending reasoning trace (if any). The trace
+# is finalized into <git-dir>/walgit/traces/<sha>.json later, when the agent's
+# session ends. Exits 0 silently when there's no pending trace, so plain
+# `git commit` keeps working.
 if command -v walgit >/dev/null 2>&1; then
     walgit trace snapshot >/dev/null || true
 fi

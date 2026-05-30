@@ -108,23 +108,30 @@ pub(super) enum StopOutcome {
 ///
 /// 1. **Read-only** (no edits, no commits) → [`Discard`](StopOutcome::Discard).
 ///    Keeps MemWal free of "agent just looked around" entries.
-/// 2. **Changed but not committed yet** →
-///    [`KeepPending`](StopOutcome::KeepPending); there's no SHA to key on.
-/// 3. **Committed, no decision yet, first Stop** →
-///    [`RequestSummary`](StopOutcome::RequestSummary).
-/// 4. **Committed, decision present OR we already asked (`stop_active`)** →
-///    [`Finalize`](StopOutcome::Finalize). The `stop_active` arm is the loop
-///    guard: even if the agent ignores the request we finalize on the second
-///    Stop rather than asking forever.
+/// 2. **Changed, no decision yet, not already asked** →
+///    [`RequestSummary`](StopOutcome::RequestSummary). We ask as soon as the
+///    session has edits, *without waiting for a commit* — in a typical "vibe
+///    coding" flow the user commits and pushes by hand, so the agent's turn
+///    ends before any commit exists. Asking here is the only moment we're still
+///    inside the agent loop and can have it write a real "why" hands-free.
+/// 3. **Changed but not committed yet** (decision captured, or we already
+///    asked) → [`KeepPending`](StopOutcome::KeepPending); there's no SHA to key
+///    a snapshot on, so the decision waits in the pending file until a commit
+///    lands and push-time finalize ships it.
+/// 4. **Committed** → [`Finalize`](StopOutcome::Finalize).
+///
+/// The `stop_active` flag is the loop guard: Claude sets it on the Stop that
+/// fires right after a blocked Stop, so we ask at most once per stop-chain and
+/// never trap the agent in an ask-forever loop.
 pub(super) fn decide_stop(pt: &PendingTrace, stop_active: bool) -> StopOutcome {
     if !pt.has_changes() {
         return StopOutcome::Discard;
     }
-    if pt.commits.is_empty() {
-        return StopOutcome::KeepPending;
-    }
     if pt.decision.trim().is_empty() && !stop_active {
         return StopOutcome::RequestSummary;
+    }
+    if pt.commits.is_empty() {
+        return StopOutcome::KeepPending;
     }
     StopOutcome::Finalize
 }
@@ -275,11 +282,13 @@ pub(super) fn finalize_session(git_dir: &Path, pt: &mut PendingTrace) -> Result<
 pub(super) fn apply_claude_event(pt: &mut PendingTrace, event: ClaudeEvent, payload: &Value) {
     match event {
         ClaudeEvent::UserPrompt => {
-            // First user prompt of a session is a strong signal for the
+            // First *real* user prompt of a session is a strong signal for the
             // task field; later prompts shouldn't clobber it.
             if pt.task.trim().is_empty() {
                 if let Some(p) = payload.get("prompt").and_then(Value::as_str) {
-                    pt.task = truncate(p.lines().next().unwrap_or(p), 200);
+                    if let Some(task) = clean_prompt_for_task(p) {
+                        pt.task = truncate(&task, 200);
+                    }
                 }
             }
         }
@@ -302,6 +311,66 @@ pub(super) fn apply_claude_event(pt: &mut PendingTrace, event: ClaudeEvent, payl
             // to `handle_stop`. Kept only for match exhaustiveness.
         }
     }
+}
+
+/// Extract the real user request from a Claude Code prompt for use as the
+/// `task`. Claude often injects context wrappers — `<ide_opened_file>`,
+/// `<ide_selection>`, `<system-reminder>`, etc. — ahead of (or instead of) the
+/// user's text. Taking the literal first line then captures noise like
+/// `<ide_opened_file>The user opened …`, which is what showed up as a garbage
+/// task in the field. We drop any line that is wholly inside such an injected
+/// tag and return the first genuine line of prose. Returns `None` when the
+/// prompt is *only* injected context (no real ask yet) so a later prompt can
+/// fill the task instead.
+fn clean_prompt_for_task(prompt: &str) -> Option<String> {
+    let mut in_block = false; // inside a multi-line injected tag block
+    for raw in prompt.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if in_block {
+            // Wait for the block to close, then keep scanning for real prose.
+            if line.starts_with("</") || line.ends_with("/>") {
+                in_block = false;
+            }
+            continue;
+        }
+        if injected_tag_line(line) {
+            // Self-contained `<tag>…</tag>` (or `<tag/>`) → skip just this line.
+            // A bare opening `<tag>` with no close → skip the whole block.
+            if !(line.contains("</") || line.ends_with("/>")) {
+                in_block = true;
+            }
+            continue;
+        }
+        // First line that isn't injected context — this is the real request.
+        return Some(line.to_string());
+    }
+    None
+}
+
+/// True if `line` begins with an injected context tag we should ignore — the
+/// wrappers Claude Code prepends (`<ide_opened_file>`, `<ide_selection>`,
+/// `<system-reminder>`, `<command-name>`, …): a `<` followed by a lowercase tag
+/// name of `[a-z0-9_-]`, then `>`, space, or `/`. Real prose rarely starts that
+/// way, and never with these tag names.
+fn injected_tag_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('<') else {
+        return false;
+    };
+    if rest.starts_with('/') {
+        return false;
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
+        .collect();
+    !name.is_empty()
+        && rest[name.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c == ' ' || c == '/')
 }
 
 /// Pick the most meaningful field from `tool_input` for the given tool. The
@@ -506,6 +575,60 @@ mod tests {
         assert_eq!(pt.task, "fix the flaky test");
     }
 
+    #[test]
+    fn user_prompt_skips_injected_ide_context() {
+        // The field bug: the first "prompt" is a Claude-injected IDE context
+        // tag, not the user's words. Task must not become "<ide_opened_file>…".
+        let mut pt = PendingTrace::new("a".into(), "r".into(), None);
+        let injected = "<ide_opened_file>The user opened /src/Calculator.tsx in the IDE.</ide_opened_file>";
+        apply_claude_event(&mut pt, ClaudeEvent::UserPrompt, &json!({"prompt": injected}));
+        // Pure injected context → task stays empty, ready for the real prompt.
+        assert_eq!(pt.task, "");
+        apply_claude_event(
+            &mut pt,
+            ClaudeEvent::UserPrompt,
+            &json!({"prompt": "add a calculator to the home page"}),
+        );
+        assert_eq!(pt.task, "add a calculator to the home page");
+    }
+
+    #[test]
+    fn clean_prompt_strips_leading_injected_block_keeps_prose() {
+        // Multi-line injected block followed by the real ask on a later line.
+        let p = "<ide_selection>\n  lines 1-5 of foo.rs\n</ide_selection>\nrefactor the parser";
+        assert_eq!(clean_prompt_for_task(p).as_deref(), Some("refactor the parser"));
+    }
+
+    #[test]
+    fn clean_prompt_single_line_injected_then_prose() {
+        let p = "<system-reminder>be concise</system-reminder>\nship the fix";
+        assert_eq!(clean_prompt_for_task(p).as_deref(), Some("ship the fix"));
+    }
+
+    #[test]
+    fn clean_prompt_plain_text_unchanged() {
+        assert_eq!(
+            clean_prompt_for_task("just do the thing").as_deref(),
+            Some("just do the thing")
+        );
+    }
+
+    #[test]
+    fn clean_prompt_only_injected_returns_none() {
+        let p = "<ide_opened_file>opened x.rs</ide_opened_file>";
+        assert_eq!(clean_prompt_for_task(p), None);
+    }
+
+    #[test]
+    fn clean_prompt_does_not_eat_real_angle_bracket_prose() {
+        // A real ask that happens to use `<` (e.g. code/comparison) is not an
+        // injected tag and must be preserved.
+        assert_eq!(
+            clean_prompt_for_task("make sure a < b in the guard").as_deref(),
+            Some("make sure a < b in the guard")
+        );
+    }
+
     // ─── Stop-hook decision logic ────────────────────────────────────────
 
     /// Build a pending trace and optionally give it an edit and/or a commit,
@@ -539,8 +662,19 @@ mod tests {
     }
 
     #[test]
-    fn decide_stop_edited_but_uncommitted_keeps_pending() {
+    fn decide_stop_edited_uncommitted_requests_summary() {
+        // The core fix: ask for the "why" as soon as there are edits, even
+        // before any commit exists — the common vibe-coding flow where the user
+        // commits/pushes by hand after the agent's turn ends.
         let pt = pt_with(true, false, "");
+        assert_eq!(decide_stop(&pt, false), StopOutcome::RequestSummary);
+    }
+
+    #[test]
+    fn decide_stop_edited_uncommitted_with_decision_keeps_pending() {
+        // Decision already captured but no commit yet → hold the trace until a
+        // commit lands (push-time finalize ships it). Don't ask again.
+        let pt = pt_with(true, false, "did the thing because reasons");
         assert_eq!(decide_stop(&pt, false), StopOutcome::KeepPending);
     }
 
@@ -562,6 +696,14 @@ mod tests {
         // than asking forever, even though the agent left decision empty.
         let pt = pt_with(true, true, "");
         assert_eq!(decide_stop(&pt, true), StopOutcome::Finalize);
+    }
+
+    #[test]
+    fn decide_stop_loop_guard_keeps_pending_when_uncommitted() {
+        // Already asked (stop_active) but no commit and no decision → don't ask
+        // again, just hold pending for the eventual commit.
+        let pt = pt_with(true, false, "");
+        assert_eq!(decide_stop(&pt, true), StopOutcome::KeepPending);
     }
 
     #[test]

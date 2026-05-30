@@ -5,8 +5,8 @@
 WalGit is a decentralized Git host built on [Sui](https://sui.io) smart contracts and
 [Walrus](https://walrus.xyz) blob storage. You push, pull, and clone with the same `git`
 commands you already use — but every commit becomes on-chain provenance, every private repo
-is end-to-end encrypted with [Seal](https://github.com/MystenLabs/seal), and every commit can
-carry a **reasoning trace** that turns the repository into a searchable, tamper-evident memory
+is end-to-end encrypted with [Seal](https://github.com/MystenLabs/seal), and every work session
+can leave a **reasoning trace** that turns the repository into a searchable, encrypted memory
 of *why* the code is the way it is.
 
 No company owns your code. Ownership is your Sui wallet.
@@ -29,8 +29,8 @@ Sui  ·  Walrus  ·  Seal  ·  Rust CLI  ·  MCP-ready
 - **Sealed private repos.** Private repositories use Seal identity-based encryption gated by an
   on-chain ACL. Only addresses on the read list can derive a decryption key — no key rotation
   on grant.
-- **🧠 Repository Memory (the feature we lead with).** Reasoning traces attached to commits make
-  the repo a per-project memory cell — searchable by meaning, tamper-evident, agent-readable.
+- **🧠 Repository Memory (the feature we lead with).** A reasoning trace per work session makes
+  the repo a per-project memory cell — searchable by meaning, Seal-encrypted, agent-readable.
   [Jump to Repository Memory ↓](#-repository-memory)
 
 ---
@@ -167,15 +167,18 @@ walgit access grant read 0x<collaborator-address>   # a single Sui tx
 
 > Code remembers *why*, not just *what*.
 
-This is the feature WalGit leads with. Every commit can carry a **reasoning trace** — the task,
-the decision made, the alternatives rejected, the tools used, and a self-rated confidence. Traces
-live in three places at once:
+This is the feature WalGit leads with. Each **work session** records a **reasoning trace** — the
+task, the decision made, and the alternatives rejected — keyed to the commits it produced. The
+unit of memory is the *session*, not the individual commit: one compact entry even across several
+commits, and read-only sessions (the agent just looked around) are never stored. A finalized
+trace lives in two places:
 
-- **In the commit message** (inside a `--- walgit-trace ---` fence) — so Git's SHA seals them.
-  Any edit changes the SHA.
-- **In `.git/walgit/traces/`** — local snapshots for offline recall.
-- **In [MemWal](#memwal)** — an off-chain relayer that vector-embeds traces for semantic search
-  across the repo's entire history.
+- **In `.git/walgit/traces/<sha>.json`** — a compact local snapshot for offline recall.
+- **In [MemWal](#memwal)** — an off-chain relayer that Seal-encrypts each trace and vector-embeds
+  it for semantic search across the repo's entire history.
+
+The commits a trace points at are on-chain Sui objects, so the provenance is tamper-evident even
+though the lean trace text itself lives off-chain (local + MemWal), never bloating the Git history.
 
 Multiply this across a repo's lifetime and you get **one memory cell per repository** —
 project-scoped (not user-scoped), portable across forks, permissioned by the same Seal ACL as the
@@ -188,7 +191,7 @@ code, and survivable if the relayer ever disappears.
 | **Future-you** | `walgit trace recall "cache layer"` surfaces the original decision and the alternatives considered. |
 | **Agents** | LLMs are stateless; repository memory gives them long-term, per-project continuity — including alternatives they already rejected. |
 | **Teams** | When someone leaves, their reasoning stays. Onboarding becomes `walgit trace recall "auth module"` instead of "ping whoever wrote this." |
-| **Auditors** | Every decision around sensitive code is timestamped on chain and cryptographically sealed in Git. Replays and retroactive edits are detectable. |
+| **Auditors** | Every decision is anchored to on-chain commit provenance and Seal-encrypted in MemWal. Edits to the underlying commits change their SHAs and are detectable on chain. |
 
 ### Set it up
 
@@ -205,22 +208,25 @@ walgit trace install --agent claude-code
 
 ### Use it
 
+With hooks installed, recording is automatic: the session opens on start, prompts and tool
+calls are captured as you work, the `post-commit` hook tags each commit's SHA, and when your
+turn ends the agent is asked once to record a short *why*. Day to day you only need two commands:
+
 ```bash
-# Start a trace for a work session (hooks also do this automatically)
-walgit trace start --task "add a token-bucket rate limiter"
+walgit trace recall "rate limiting"    # semantic search across the repo's memory
+walgit show <sha> --trace              # read a commit's recorded reasoning
+```
 
-# ... do the work; Claude Code / Cursor hooks append prompts and tool calls ...
+Driving it by hand (autonomous agents, or when you want to set the decision yourself):
 
-# Record the decision before committing
+```bash
 walgit trace set --decision "in-memory token bucket, 30 req/min per IP" \
                  --alternative "redis sliding window — extra dep, deferred"
 
-git commit -m "feat: rate limiter"     # post-commit hook seals the trace to the SHA
-
-walgit trace upload                    # ship snapshots to MemWal
-walgit trace recall "rate limiting"    # semantic search across the repo's history
-walgit show <sha> --trace              # read any commit's full reasoning
-walgit trace diff <sha_a> <sha_b>      # compare reasoning side-by-side
+walgit trace status                    # inspect the in-progress session
+git commit -m "feat: rate limiter"     # post-commit hook records the SHA into the session
+git push                               # finalized traces upload to MemWal automatically
+walgit trace diff <sha_a> <sha_b>      # compare two sessions' reasoning side-by-side
 ```
 
 > **Don't put secrets in traces.** Hooks redact common patterns and `betterleaks` scans the
@@ -236,7 +242,7 @@ walgit trace diff <sha_a> <sha_b>      # compare reasoning side-by-side
 | **Repo** | `walgit init <name> [--here] [--private] [--epochs N]`, `walgit status`, `walgit log [--traces]`, `walgit show [<sha>] [--trace]` |
 | **Access** | `walgit access list`, `walgit access grant <read\|write> <addr> [--memwal-pubkey <hex>]`, `walgit access revoke …` |
 | **Forks & PRs** | `walgit fork <walgit://owner/repo>`, `walgit pr create`, `walgit pr list [--mine]`, `walgit pr show\|diff\|approve\|merge\|close <id>` |
-| **Memory** | `walgit trace start\|record\|set\|status\|abort\|snapshot\|upload\|recall\|diff\|install\|uninstall`, `walgit memwal init\|status\|list\|add-delegate\|remove-delegate` |
+| **Memory** | `walgit trace recall\|set\|status\|diff\|install\|uninstall` (everyday); `walgit trace start\|record\|abort\|snapshot\|upload` (low-level — `snapshot`/`upload` normally fire from the post-commit hook and `git push`); `walgit memwal init\|status\|list\|add-delegate\|remove-delegate` |
 | **Agents** | `walgit agent commit <paths> -m <msg> --trace <file>` |
 | **Maintenance** | `walgit gc [--keep N]`, `walgit cache list\|clean`, `walgit config [--network …] [--package-id …] [--depth N] [--keep N] [--sponsored true\|false] [--show]` |
 

@@ -23,6 +23,9 @@ Sui  ·  Walrus  ·  Seal  ·  Rust CLI  ·  MCP-ready
   `git-remote-walgit` helper transparently handles the `walgit://` URL scheme.
 - **On-chain provenance.** Each commit is a Sui object linked to its Walrus blob. Forks, ACL
   changes, and PRs are all auditable on chain.
+- **Snapshot storage.** Each push uploads one self-contained shallow snapshot, so a clone fetches
+  a single blob per branch — no parent-chain walk. Superseded snapshots are garbage-collected
+  automatically; the on-chain commit ledger stays the authoritative full history.
 - **Sealed private repos.** Private repositories use Seal identity-based encryption gated by an
   on-chain ACL. Only addresses on the read list can derive a decryption key — no key rotation
   on grant.
@@ -63,6 +66,10 @@ The installer:
    (via `brew` or `dnf`; runs before every push, PR, and MemWal upload).
 4. Installs the Sui CLI (via [`suiup`](https://github.com/Mystenlabs/suiup)) and Walrus CLI,
    and offers to create a Sui wallet for you.
+5. Asks whether to use **sponsored mode** (`Y/n`). Choosing yes runs
+   `walgit config --sponsored true` so the platform supplies the contract IDs and endpoints;
+   choosing no prints how to deploy the Move contracts in [`contracts/`](contracts) yourself
+   (`sui client publish`) and set `--package-id`/`--registry-id`.
 
 ### Environment variables
 
@@ -93,12 +100,21 @@ cargo install --path mcp-server
 
 After installing, three things must be in place before `walgit init` works:
 
-**1. Point the CLI at the deployed WalGit package (required).** Every on-chain command needs the
-package and registry object IDs for your network:
+**1. Point the CLI at the deployed WalGit package.** Every on-chain command needs the package and
+registry object IDs for your network. You have two options:
 
 ```bash
+# a) Standalone — set the IDs yourself:
 walgit config --package-id <PACKAGE_ID> --registry-id <REGISTRY_ID>
+
+# b) Sponsored — let the WalGit platform supply the contract + endpoints:
+walgit config --sponsored true
 ```
+
+In **sponsored** mode the package/registry IDs and Walrus/Seal endpoints are fetched from the
+WalGit backend (cached locally, refreshed periodically) instead of being hand-set, so the platform
+can rotate contracts centrally. Point it at a self-hosted backend for local testing with
+`WALGIT_BACKEND=http://localhost:8080`.
 
 **2. A funded Sui wallet.** The installer offers to create one
 (`sui client new-address ed25519 walgit-account`); on testnet, fund it from the faucet so you can
@@ -222,7 +238,7 @@ walgit trace diff <sha_a> <sha_b>      # compare reasoning side-by-side
 | **Forks & PRs** | `walgit fork <walgit://owner/repo>`, `walgit pr create`, `walgit pr list [--mine]`, `walgit pr show\|diff\|approve\|merge\|close <id>` |
 | **Memory** | `walgit trace start\|record\|set\|status\|abort\|snapshot\|upload\|recall\|diff\|install\|uninstall`, `walgit memwal init\|status\|list\|add-delegate\|remove-delegate` |
 | **Agents** | `walgit agent commit <paths> -m <msg> --trace <file>` |
-| **Maintenance** | `walgit cache list\|clean`, `walgit config [--network …] [--package-id …] [--show]` |
+| **Maintenance** | `walgit gc [--keep N]`, `walgit cache list\|clean`, `walgit config [--network …] [--package-id …] [--depth N] [--keep N] [--sponsored true\|false] [--show]` |
 
 Run `walgit --help` or `walgit <command> --help` for full flags.
 
@@ -259,6 +275,31 @@ Run `walgit --help` or `walgit <command> --help` for full flags.
 - **Sui** holds structured metadata and access logic (atomic, auditable).
 - **Walrus** holds the bytes (cheap immutable storage with retention epochs).
 - **Seal** encrypts those bytes so the ACL enforces confidentiality, not just trust.
+
+---
+
+## Storage model — snapshots & gc
+
+Each push uploads a **self-contained shallow snapshot**: the object closure of the most recent
+`depth` commits (default `1000`). Because every snapshot stands alone, a clone only needs the
+single blob referenced by each branch head — there is no parent-chain walk, and expiry of older
+blobs can never break a fresh clone. After unpacking, the helper writes `.git/shallow` so native
+git accepts the (intentionally) truncated history; commits older than the window age out of Walrus.
+
+You own every snapshot `Blob` object (stored *deletable* and transferred to your address — even on
+a sponsored publisher), so you control its lifecycle. After each successful push, WalGit
+**garbage-collects** superseded snapshots: it keeps the newest `keep` (default `3`) as a rollback
+buffer plus any blob still serving a live branch head, and deletes the rest via the `walrus` CLI.
+Run it manually any time with `walgit gc` (`--keep N` to override).
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `storage.depth` | `1000` | Most-recent commits each push snapshots (`--depth`) |
+| `storage.keep` | `3` | Snapshot blobs kept alive per repo before gc (`--keep`) |
+| `storage.sponsored` | `false` | Fetch contract + endpoints from the platform backend (`--sponsored`) |
+
+The on-chain `Commit` chain remains the authoritative, full history regardless of which blobs are
+still resident in Walrus.
 
 ---
 

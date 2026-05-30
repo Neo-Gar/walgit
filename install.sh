@@ -260,6 +260,56 @@ else
     || warn "walrus installer failed; install it manually from https://install.wal.app"
 fi
 
+# ---- network / contract setup ----------------------------------------------
+# Sponsored mode: the WalGit platform supplies the contract IDs + endpoints, so
+# the user never deploys or configures contracts. Opting out means deploying the
+# Move contracts in contracts/ yourself and pointing the CLI at them.
+WALGIT_BIN="$PREFIX/walgit"
+[ -x "$WALGIT_BIN" ] || WALGIT_BIN="walgit"
+SPONSORED=0
+
+info "Sponsored mode lets the WalGit platform supply the contract IDs and"
+info "Walrus/Seal endpoints automatically — no contract deployment needed."
+if prompt_yn "Use sponsored mode?" "y"; then
+  if "$WALGIT_BIN" config --sponsored true >/dev/null 2>&1; then
+    SPONSORED=1
+    info "Sponsored mode enabled."
+  else
+    warn "Could not enable sponsored mode automatically."
+    warn "Run it manually later: walgit config --sponsored true"
+  fi
+else
+  cat <<EOF
+
+Standalone mode — deploy your own WalGit Move contracts (Sui Move):
+
+  1. Fund your Sui address with gas.
+     Testnet faucet: https://faucet.sui.io/?network=testnet
+
+  2. Clone the repo to get the contract sources:
+       git clone https://github.com/${REPO}.git
+       cd walgit/contracts
+
+  3. Publish the contracts (uses your active Sui address for gas):
+       sui client publish
+
+  4. From the publish output, copy two IDs:
+       - package ID   → "Published Objects" → PackageID
+       - registry ID  → "Created Objects" → the shared Registry object
+                        (also emitted as the RegistryCreated event)
+
+  5. Point WalGit at them:
+       walgit config --package-id <PACKAGE_ID> --registry-id <REGISTRY_ID>
+
+EOF
+fi
+
+if [ "$SPONSORED" = "1" ]; then
+  SETUP_NOTE="Network is configured via sponsored mode ('walgit config --show' to verify)."
+else
+  SETUP_NOTE="Deploy + configure your contracts (see the standalone-mode steps above)."
+fi
+
 cat <<EOF
 
 WalGit ${VERSION} installed.
@@ -274,9 +324,7 @@ Security:
   $(command -v betterleaks >/dev/null 2>&1 && echo "betterleaks: installed" || echo "betterleaks: not found — scans will be skipped (WALGIT_SKIP_BETTERLEAKS=1 to silence)")
 
 Next steps:
-  1. Configure the deployed WalGit package for your network (REQUIRED — every
-     on-chain command needs this; without it 'walgit init' will fail):
-       walgit config --package-id <PACKAGE_ID> --registry-id <REGISTRY_ID>
+  1. ${SETUP_NOTE}
 
   2. Create a repository:
        walgit init <repo>

@@ -170,12 +170,61 @@ for bin in walgit git-remote-walgit walgit-mcp; do
   info "Installed $PREFIX/$bin"
 done
 
-# ---- PATH hint --------------------------------------------------------------
+# ---- PATH setup -------------------------------------------------------------
+# Offer to append the PATH export to the user's shell rc so the freshly
+# installed binaries are usable in new shells without manual editing.
+add_to_path_rc() {
+  # Pick the rc file for the user's login shell.
+  _shell="$(basename "${SHELL:-}")"
+  case "$_shell" in
+    zsh)  _rc="$HOME/.zshrc" ;;
+    bash) [ -f "$HOME/.bashrc" ] && _rc="$HOME/.bashrc" || _rc="$HOME/.bash_profile" ;;
+    fish) _rc="$HOME/.config/fish/config.fish" ;;
+    *)    _rc="$HOME/.profile" ;;
+  esac
+  _line="export PATH=\"$PREFIX:\$PATH\""
+  [ "$_shell" = "fish" ] && _line="fish_add_path $PREFIX"
+  # Don't double-append if the rc already references PREFIX.
+  if [ -f "$_rc" ] && grep -qF "$PREFIX" "$_rc" 2>/dev/null; then
+    info "PATH entry for $PREFIX already present in $_rc"
+    return 0
+  fi
+  mkdir -p "$(dirname "$_rc")"
+  printf '\n# Added by WalGit installer\n%s\n' "$_line" >> "$_rc" \
+    && info "Added $PREFIX to PATH in $_rc — open a new shell or run: $_line" \
+    || warn "Could not write to $_rc; add this manually: $_line"
+}
+
 case ":$PATH:" in
-  *":$PREFIX:"*) ;;
-  *) warn "$PREFIX is not in your PATH. Add this to your shell rc:"
-     printf '       export PATH="%s:$PATH"\n' "$PREFIX" ;;
+  *":$PREFIX:"*) ;;  # already on PATH
+  *)
+    warn "$PREFIX is not in your PATH."
+    if prompt_yn "Add $PREFIX to your PATH automatically?" "y"; then
+      add_to_path_rc
+    else
+      warn "Add this to your shell rc yourself:"
+      printf '       export PATH="%s:$PATH"\n' "$PREFIX"
+    fi
+    ;;
 esac
+
+# ---- shadowing check --------------------------------------------------------
+# A `walgit` earlier in PATH (commonly a prior `cargo install --path cli` in
+# ~/.cargo/bin) silently overrides the binary we just installed — the user runs
+# an old build without realising. Detect and warn loudly.
+_active="$(command -v walgit 2>/dev/null || true)"
+if [ -n "$_active" ] && [ "$_active" != "$PREFIX/walgit" ]; then
+  warn "Another 'walgit' is ahead of this install in your PATH:"
+  warn "    active : $_active"
+  warn "    this   : $PREFIX/walgit"
+  case "$_active" in
+    "$HOME/.cargo/bin/walgit")
+      warn "Looks like a previous 'cargo install'. Remove it so the released build wins:"
+      warn "    cargo uninstall walgit git-remote-walgit walgit-mcp" ;;
+    *)
+      warn "Remove it, or put $PREFIX earlier in your PATH, so 'walgit' resolves to this install." ;;
+  esac
+fi
 
 # ---- betterleaks (secret scanning) -----------------------------------------
 # Install methods per upstream (github.com/betterleaks/betterleaks):

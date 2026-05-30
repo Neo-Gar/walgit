@@ -51,6 +51,24 @@ jobs:
           restore-keys: |
             cargo-${{ matrix.target }}-
 
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${ref#v}"
+          # Validate it looks like semver so a stray tag can't corrupt Cargo.toml.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$'; then
+            echo "tag '$ref' is not a semver version — refusing to stamp" >&2
+            exit 1
+          fi
+          # The binaries embed CARGO_PKG_VERSION at compile time, so `walgit
+          # --version` reflects whatever is in [workspace.package]. The repo keeps
+          # 0.1.0 there; rewrite it to the release tag for this build only.
+          perl -0pi -e "s/(\[workspace\.package\]\s*\nversion = \")[^\"]*(\")/\${1}${version}\${2}/" Cargo.toml
+          echo "Stamped workspace version → ${version}"
+          grep -A1 '\[workspace.package\]' Cargo.toml
+
       - name: Build release binaries
         run: cargo build --release --workspace --target ${{ matrix.target }}
 

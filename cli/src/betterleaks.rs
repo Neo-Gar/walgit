@@ -38,9 +38,42 @@ pub enum ScanOutcome {
 /// in `~/.walgit/config.toml`. When skipped, ALL scans and warnings are
 /// suppressed — the caller should short-circuit before calling any other fn.
 pub fn is_skipped() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = test_override::get() {
+        return forced;
+    }
     crate::config::load()
         .map(|c| c.betterleaks.skip)
         .unwrap_or(false)
+}
+
+/// Force [`is_skipped`] to return `skip` for the rest of the test, bypassing
+/// the user's `~/.walgit/config.toml`. Test-only so unit tests for code that
+/// calls `is_skipped` (e.g. trace finalize) don't depend on machine config or
+/// shell out to `betterleaks`.
+#[cfg(test)]
+pub fn set_skip(skip: bool) {
+    test_override::set(skip);
+}
+
+#[cfg(test)]
+mod test_override {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    // 0 = unset (use config), 1 = force false, 2 = force true.
+    static STATE: AtomicU8 = AtomicU8::new(0);
+
+    pub fn get() -> Option<bool> {
+        match STATE.load(Ordering::Relaxed) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn set(skip: bool) {
+        STATE.store(if skip { 2 } else { 1 }, Ordering::Relaxed);
+    }
 }
 
 // ─── Availability check ───────────────────────────────────────────────────────

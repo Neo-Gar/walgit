@@ -90,45 +90,65 @@ pub async fn record(kind: RecordKind, only_if_enabled: bool) -> Result<()> {
     Ok(())
 }
 
-/// Handle Claude Code's `Stop` hook — the agent has finished its turn.
+/// What a `Stop` event should do, decided purely from the trace state. Kept
+/// separate from the I/O so the branching logic is unit-testable in isolation.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum StopOutcome {
+    /// Read-only session — discard the pending trace, store nothing.
+    Discard,
+    /// Changed but not committed — keep pending, wait for the commit.
+    KeepPending,
+    /// Committed without a summary — ask the agent to write its `decision`.
+    RequestSummary,
+    /// Ready to crystallise into a stored memory.
+    Finalize,
+}
+
+/// Decide what a `Stop` means for this session. Pure: no disk, no stdout.
 ///
-/// This is the moment a session crystallises into a stored memory. The states:
-///
-/// 1. **Read-only** (no edits, no commits) → discard the pending trace and
-///    write nothing. Keeps MemWal free of "agent just looked around" entries.
-/// 2. **Changed but not committed yet** → keep the pending trace alive so the
-///    work folds into the eventual commit; there's no SHA to key a memory on.
-/// 3. **Committed, no decision yet, first Stop** → ask the running agent to
-///    summarise by emitting a `decision: block` control object. Claude feeds
-///    the `reason` back as a prompt and the agent calls `walgit trace set
-///    --decision …`, after which it stops again.
-/// 4. **Committed, decision present OR we already asked (`stop_hook_active`)**
-///    → finalize: write one compact session snapshot and clear the pending
-///    trace. The `stop_hook_active` guard guarantees we never loop forever even
-///    if the agent ignores the request.
-fn handle_stop(git_dir: &Path, mut pt: PendingTrace, payload: &Value) -> Result<()> {
+/// 1. **Read-only** (no edits, no commits) → [`Discard`](StopOutcome::Discard).
+///    Keeps MemWal free of "agent just looked around" entries.
+/// 2. **Changed but not committed yet** →
+///    [`KeepPending`](StopOutcome::KeepPending); there's no SHA to key on.
+/// 3. **Committed, no decision yet, first Stop** →
+///    [`RequestSummary`](StopOutcome::RequestSummary).
+/// 4. **Committed, decision present OR we already asked (`stop_active`)** →
+///    [`Finalize`](StopOutcome::Finalize). The `stop_active` arm is the loop
+///    guard: even if the agent ignores the request we finalize on the second
+///    Stop rather than asking forever.
+pub(super) fn decide_stop(pt: &PendingTrace, stop_active: bool) -> StopOutcome {
     if !pt.has_changes() {
-        trace_pending::delete(git_dir)?;
-        return Ok(());
+        return StopOutcome::Discard;
     }
     if pt.commits.is_empty() {
-        // Edited but not committed — persist as-is and wait for the commit.
-        trace_pending::save(git_dir, &pt)?;
-        return Ok(());
+        return StopOutcome::KeepPending;
     }
+    if pt.decision.trim().is_empty() && !stop_active {
+        return StopOutcome::RequestSummary;
+    }
+    StopOutcome::Finalize
+}
 
+/// Handle Claude Code's `Stop` hook — the agent has finished its turn. Applies
+/// the I/O for the outcome [`decide_stop`] computes.
+fn handle_stop(git_dir: &Path, mut pt: PendingTrace, payload: &Value) -> Result<()> {
     let stop_active = payload
         .get("stop_hook_active")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if pt.decision.trim().is_empty() && !stop_active {
+
+    match decide_stop(&pt, stop_active) {
+        StopOutcome::Discard => trace_pending::delete(git_dir),
+        // Edited but not committed — persist as-is and wait for the commit.
+        StopOutcome::KeepPending => trace_pending::save(git_dir, &pt),
         // Ask the agent to write its own summary; leave pending untouched so
         // the agent's `trace set --decision` fills it before the next Stop.
-        emit_summary_request();
-        return Ok(());
+        StopOutcome::RequestSummary => {
+            emit_summary_request();
+            Ok(())
+        }
+        StopOutcome::Finalize => finalize_session(git_dir, &mut pt),
     }
-
-    finalize_session(git_dir, &mut pt)
 }
 
 /// Emit the Stop-hook control object that asks the agent to summarise its work.
@@ -361,7 +381,6 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace_pending::PendingTrace;
     use serde_json::json;
 
     #[test]
@@ -439,5 +458,140 @@ mod tests {
         );
         // Second prompt does NOT overwrite the task — first user prompt wins.
         assert_eq!(pt.task, "fix the flaky test");
+    }
+
+    // ─── Stop-hook decision logic ────────────────────────────────────────
+
+    /// Build a pending trace and optionally give it an edit and/or a commit,
+    /// so each `decide_stop` case is one readable line at the call site.
+    fn pt_with(edited: bool, committed: bool, decision: &str) -> PendingTrace {
+        let mut pt = PendingTrace::new("claude-code".into(), "run-x".into(), None);
+        if edited {
+            pt.push_tool(ToolCall {
+                name: "Edit".into(),
+                input_summary: "src/lib.rs".into(),
+                output_summary: "ok".into(),
+            });
+        }
+        if committed {
+            pt.mark_commit("a".repeat(40));
+        }
+        pt.decision = decision.into();
+        pt
+    }
+
+    #[test]
+    fn decide_stop_read_only_is_discard() {
+        // Only a Read tool call, no commit → nothing worth remembering.
+        let mut pt = PendingTrace::new("a".into(), "r".into(), None);
+        pt.push_tool(ToolCall {
+            name: "Read".into(),
+            input_summary: "src/lib.rs".into(),
+            output_summary: "10 lines".into(),
+        });
+        assert_eq!(decide_stop(&pt, false), StopOutcome::Discard);
+    }
+
+    #[test]
+    fn decide_stop_edited_but_uncommitted_keeps_pending() {
+        let pt = pt_with(true, false, "");
+        assert_eq!(decide_stop(&pt, false), StopOutcome::KeepPending);
+    }
+
+    #[test]
+    fn decide_stop_committed_without_decision_requests_summary() {
+        let pt = pt_with(true, true, "");
+        assert_eq!(decide_stop(&pt, false), StopOutcome::RequestSummary);
+    }
+
+    #[test]
+    fn decide_stop_committed_with_decision_finalizes() {
+        let pt = pt_with(true, true, "did the thing because reasons");
+        assert_eq!(decide_stop(&pt, false), StopOutcome::Finalize);
+    }
+
+    #[test]
+    fn decide_stop_loop_guard_finalizes_even_without_decision() {
+        // stop_hook_active=true means we already asked once. Finalize rather
+        // than asking forever, even though the agent left decision empty.
+        let pt = pt_with(true, true, "");
+        assert_eq!(decide_stop(&pt, true), StopOutcome::Finalize);
+    }
+
+    #[test]
+    fn decide_stop_commit_without_edit_still_counts_as_changed() {
+        // A commit with no recorded Edit (e.g. agent committed via Bash `git
+        // commit`) is still a real change worth remembering.
+        let pt = pt_with(false, true, "");
+        assert_eq!(decide_stop(&pt, false), StopOutcome::RequestSummary);
+    }
+
+    // ─── finalize_session integration ────────────────────────────────────
+
+    #[test]
+    fn finalize_session_writes_compact_snapshot_and_clears_pending() {
+        crate::betterleaks::set_skip(true); // no scanning in the unit test
+        let td = tempfile::TempDir::new().unwrap();
+        let git_dir = td.path();
+
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.decision = "tightened the check because tokens leaked".into();
+        pt.mark_commit("a".repeat(40));
+        pt.mark_commit("b".repeat(40));
+        // Two file touches (one duplicated by basename) + a Read.
+        for (name, path) in [
+            ("Edit", "/abs/src/auth.rs"),
+            ("Write", "auth.rs"),
+            ("Read", "/abs/src/other.rs"),
+        ] {
+            pt.push_tool(ToolCall {
+                name: name.into(),
+                input_summary: path.into(),
+                output_summary: "ok".into(),
+            });
+        }
+        trace_pending::save(git_dir, &pt).unwrap();
+
+        finalize_session(git_dir, &mut pt).unwrap();
+
+        // Pending is cleared.
+        assert!(trace_pending::load(git_dir).unwrap().is_none());
+
+        // Exactly one snapshot, keyed by the LAST commit.
+        let snaps = trace_pending::list_snapshots(git_dir).unwrap();
+        assert_eq!(snaps.len(), 1);
+        let (sha, path) = &snaps[0];
+        assert_eq!(sha, &"b".repeat(40));
+
+        let saved = trace_pending::load_snapshot(path).unwrap();
+        // Bulky tool log dropped...
+        assert!(saved.tools_called.is_empty());
+        // ...but the derived, deduped basenames survive.
+        assert_eq!(saved.files, vec!["auth.rs", "other.rs"]);
+        assert_eq!(saved.commits.len(), 2);
+        assert_eq!(saved.decision, "tightened the check because tokens leaked");
+    }
+
+    #[test]
+    fn finalize_session_fills_task_from_commit_message() {
+        crate::betterleaks::set_skip(true);
+        let td = tempfile::TempDir::new().unwrap();
+        let git_dir = td.path();
+
+        let mut pt = PendingTrace::new("claude-code".into(), "run-2".into(), None);
+        pt.mark_commit("c".repeat(40));
+        // Task is empty; a Bash `git commit -m` should seed it.
+        pt.push_tool(ToolCall {
+            name: "Bash".into(),
+            input_summary: "git commit -m \"add rate limiter\"".into(),
+            output_summary: "ok".into(),
+        });
+        assert!(pt.task.is_empty());
+
+        finalize_session(git_dir, &mut pt).unwrap();
+
+        let snaps = trace_pending::list_snapshots(git_dir).unwrap();
+        let saved = trace_pending::load_snapshot(&snaps[0].1).unwrap();
+        assert_eq!(saved.task, "add rate limiter");
     }
 }

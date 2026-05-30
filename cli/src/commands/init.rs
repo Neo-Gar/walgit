@@ -211,6 +211,25 @@ pub async fn run(name: String, here: bool, private: bool, epochs: Option<u32>) -
         }
     }
 
+    // ─── Step 5 (optional): suggest the agent skills ──────────────────────────
+    // A fresh repo can't have project-local skills, so we only check the
+    // user-global skill dirs. If the walgit skills aren't there, point the user
+    // at them — they teach AI assistants how to drive walgit (and the repo
+    // memory, if traces were just enabled).
+    if !walgit_skills_installed_globally() {
+        println!();
+        ui::info("teach your AI assistant to use walgit — install the agent skills:");
+        println!(
+            "    {} {}",
+            ui::dim("$"),
+            ui::highlight("bunx skills add Neo-Gar/walgit-skills"),
+        );
+        ui::info(format!(
+            "  {}",
+            ui::dim("(npx / pnpm dlx work too; adds the `walgit` + `repo-memory` skills)")
+        ));
+    }
+
     println!();
     ui::info("next steps:");
     if !here {
@@ -229,6 +248,63 @@ pub async fn run(name: String, here: bool, private: bool, epochs: Option<u32>) -
     println!();
 
     Ok(())
+}
+
+/// Best-effort check whether either walgit agent skill is already installed in a
+/// user-global skills directory. Used only to decide whether to *suggest*
+/// `skills add` after init — a false negative just shows a harmless hint, so we
+/// stay cheap and tolerant rather than enumerating every supported agent.
+///
+/// The `skills` CLI installs each skill to `<base>/<name>/SKILL.md`, where the
+/// canonical `~/.agents/skills/` base covers most agents and `~/.claude/skills/`
+/// covers Claude Code. We also consult the global lockfile, which records every
+/// install by name regardless of which agent dir it landed in.
+const WALGIT_SKILL_NAMES: [&str; 2] = ["walgit", "repo-memory"];
+
+fn walgit_skills_installed_globally() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false; // can't probe — fall through to showing the hint
+    };
+
+    // Canonical install dirs. `CLAUDE_CONFIG_DIR` overrides ~/.claude.
+    let mut bases = vec![home.join(".agents").join("skills")];
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) => bases.push(Path::new(&dir).join("skills")),
+        None => bases.push(home.join(".claude").join("skills")),
+    }
+
+    // Global lockfile records every install by name regardless of agent dir.
+    // `$XDG_STATE_HOME/skills/.skill-lock.json`, else `~/.agents/.skill-lock.json`.
+    let lock_path = match std::env::var_os("XDG_STATE_HOME") {
+        Some(dir) => Path::new(&dir).join("skills").join(".skill-lock.json"),
+        None => home.join(".agents").join(".skill-lock.json"),
+    };
+
+    skills_present(&bases, &lock_path)
+}
+
+/// Pure detector: true if any walgit skill is found under one of `bases`
+/// (as `<base>/<name>/SKILL.md`) or recorded in the lockfile at `lock_path`.
+/// Split out from environment resolution so it's testable without touching
+/// process-wide env vars.
+fn skills_present(bases: &[std::path::PathBuf], lock_path: &Path) -> bool {
+    for base in bases {
+        for name in WALGIT_SKILL_NAMES {
+            if base.join(name).join("SKILL.md").exists() {
+                return true;
+            }
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(lock_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(skills) = json.get("skills").and_then(|s| s.as_object()) {
+                if WALGIT_SKILL_NAMES.iter().any(|n| skills.contains_key(*n)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Ensure `.gitignore` contains a `.walgit/` rule. Returns true if a new rule
@@ -253,4 +329,62 @@ fn ensure_gitignore(repo_dir: &Path) -> Result<bool> {
     };
     std::fs::write(&p, new)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn skills_present_false_when_nothing_installed() {
+        let td = TempDir::new().unwrap();
+        let base = td.path().join(".agents").join("skills");
+        let lock = td.path().join("missing-lock.json");
+        assert!(!skills_present(&[base], &lock));
+    }
+
+    #[test]
+    fn skills_present_detects_skill_md_on_disk() {
+        let td = TempDir::new().unwrap();
+        let base = td.path().join("skills");
+        let dir = base.join("repo-memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: repo-memory\n---\n").unwrap();
+        let lock = td.path().join("absent.json");
+        assert!(skills_present(&[base], &lock));
+    }
+
+    #[test]
+    fn skills_present_ignores_unrelated_skill_dirs() {
+        let td = TempDir::new().unwrap();
+        let base = td.path().join("skills");
+        let dir = base.join("some-other-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: other\n---\n").unwrap();
+        let lock = td.path().join("absent.json");
+        assert!(!skills_present(&[base], &lock));
+    }
+
+    #[test]
+    fn skills_present_detects_via_lockfile() {
+        let td = TempDir::new().unwrap();
+        let base = td.path().join("empty-base");
+        let lock = td.path().join(".skill-lock.json");
+        std::fs::write(
+            &lock,
+            r#"{"version":3,"skills":{"walgit":{"source":"Neo-Gar/walgit-skills"}}}"#,
+        )
+        .unwrap();
+        assert!(skills_present(&[base], &lock));
+    }
+
+    #[test]
+    fn skills_present_lockfile_without_our_skills_is_false() {
+        let td = TempDir::new().unwrap();
+        let base = td.path().join("empty-base");
+        let lock = td.path().join(".skill-lock.json");
+        std::fs::write(&lock, r#"{"version":3,"skills":{"deploy-to-vercel":{}}}"#).unwrap();
+        assert!(!skills_present(&[base], &lock));
+    }
 }

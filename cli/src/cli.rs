@@ -223,8 +223,8 @@ pub enum TraceAction {
     Diff { sha_a: String, sha_b: String },
 
     /// Open a pending trace in `.git/walgit/pending-trace.json`. Subsequent
-    /// `record`/`set` calls accumulate into it; the next `git commit` flushes
-    /// it into the commit message footer.
+    /// `record`/`set` calls accumulate into it across the whole session; it is
+    /// finalized into a per-session snapshot when the agent's turn ends.
     Start {
         /// Free-form agent identifier (e.g. `writer-v1`). Required unless
         /// `--from-claude-hook` is set.

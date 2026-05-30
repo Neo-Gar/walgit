@@ -172,6 +172,52 @@ fn emit_summary_request() {
     println!("{}", control);
 }
 
+/// Finalize a still-pending session at push time, so a trace is never lost when
+/// the agent's `Stop` hook didn't get to run a clean finalize — e.g. the user
+/// committed and pushed by hand, or commits were made by a GUI/IDE client whose
+/// minimal PATH hid `walgit` from the post-commit hook.
+///
+/// `pushed_shas` are the commits this push is making canonical (newest first).
+/// If the pending trace recorded no commits of its own (hook never fired), we
+/// adopt the pushed commits so the session can be keyed and uploaded. The
+/// `decision` may be empty here — by design we'd rather ship a trace with
+/// task + files + commits than drop it. Returns the finalized snapshot SHA, or
+/// `None` when there's nothing to finalize (no pending trace, or read-only).
+pub(super) fn finalize_pending_for_push(
+    git_dir: &Path,
+    pushed_shas: &[String],
+) -> Result<Option<String>> {
+    let Some(mut pt) = trace_pending::load(git_dir)? else {
+        return Ok(None); // no in-progress session
+    };
+
+    // Only adopt the pushed commits when the session actually edited something
+    // but the post-commit hook never recorded a SHA. A read-only session must
+    // NOT claim the user's commits — that would fabricate a memory for work the
+    // agent didn't do.
+    if pt.commits.is_empty() {
+        let edited = pt
+            .tools_called
+            .iter()
+            .any(|t| matches!(t.name.as_str(), "Write" | "Edit" | "MultiEdit" | "NotebookEdit"));
+        if !edited {
+            return Ok(None);
+        }
+        for sha in pushed_shas.iter().rev() {
+            pt.mark_commit(sha.clone());
+        }
+    }
+
+    // Still nothing to key on (e.g. push carried no commits) → leave pending.
+    if pt.commits.is_empty() {
+        return Ok(None);
+    }
+
+    let sha = pt.commits.last().cloned();
+    finalize_session(git_dir, &mut pt)?;
+    Ok(sha)
+}
+
 /// Write the compact, MemWal-bound session record and clear the pending trace.
 ///
 /// The snapshot is keyed by the session's last commit SHA so the existing
@@ -593,5 +639,99 @@ mod tests {
         let snaps = trace_pending::list_snapshots(git_dir).unwrap();
         let saved = trace_pending::load_snapshot(&snaps[0].1).unwrap();
         assert_eq!(saved.task, "add rate limiter");
+    }
+
+    // ─── finalize_pending_for_push (push-time safety net) ─────────────────
+
+    #[test]
+    fn push_finalize_adopts_pushed_commits_when_hook_never_recorded() {
+        // The exact failure we hit in the field: edits were made, but the
+        // post-commit hook never recorded a SHA (walgit not on the hook's PATH),
+        // so pending.commits is empty. On push we adopt the pushed commits.
+        crate::betterleaks::set_skip(true);
+        let td = tempfile::TempDir::new().unwrap();
+        let git_dir = td.path();
+
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.push_tool(ToolCall {
+            name: "Edit".into(),
+            input_summary: "src/App.tsx".into(),
+            output_summary: "ok".into(),
+        });
+        assert!(pt.commits.is_empty());
+        trace_pending::save(git_dir, &pt).unwrap();
+
+        // `git rev-list` order is newest-first (`[newest, …, oldest]`). We store
+        // commits oldest-first and key the session on the newest one, matching
+        // the post-commit hook path.
+        let newest = "b".repeat(40);
+        let oldest = "a".repeat(40);
+        let pushed = vec![newest.clone(), oldest.clone()];
+        let keyed = finalize_pending_for_push(git_dir, &pushed).unwrap();
+
+        assert_eq!(keyed.as_deref(), Some(newest.as_str()));
+        assert!(trace_pending::load(git_dir).unwrap().is_none()); // pending cleared
+        let snaps = trace_pending::list_snapshots(git_dir).unwrap();
+        assert_eq!(snaps.len(), 1);
+        let saved = trace_pending::load_snapshot(&snaps[0].1).unwrap();
+        assert_eq!(saved.files, vec!["App.tsx"]);
+        assert_eq!(saved.commits, vec![oldest, newest]); // oldest-first
+        assert!(saved.decision.is_empty()); // shipped without a summary, by design
+    }
+
+    #[test]
+    fn push_finalize_keeps_own_commits_over_pushed() {
+        // If the hook DID record commits, keep them — don't clobber with the
+        // push set (which could include unrelated older commits).
+        crate::betterleaks::set_skip(true);
+        let td = tempfile::TempDir::new().unwrap();
+        let git_dir = td.path();
+
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.push_tool(ToolCall {
+            name: "Write".into(),
+            input_summary: "x.rs".into(),
+            output_summary: "ok".into(),
+        });
+        pt.mark_commit("c".repeat(40));
+        trace_pending::save(git_dir, &pt).unwrap();
+
+        let pushed = vec!["b".repeat(40), "a".repeat(40)];
+        let keyed = finalize_pending_for_push(git_dir, &pushed).unwrap();
+
+        assert_eq!(keyed.as_deref(), Some("c".repeat(40).as_str()));
+        let saved =
+            trace_pending::load_snapshot(&trace_pending::list_snapshots(git_dir).unwrap()[0].1)
+                .unwrap();
+        assert_eq!(saved.commits, vec!["c".repeat(40)]);
+    }
+
+    #[test]
+    fn push_finalize_noop_when_no_pending() {
+        let td = tempfile::TempDir::new().unwrap();
+        let keyed = finalize_pending_for_push(td.path(), &["a".repeat(40)]).unwrap();
+        assert!(keyed.is_none());
+    }
+
+    #[test]
+    fn push_finalize_noop_for_readonly_session() {
+        // Read-only pending (no edits) + commits being pushed that aren't the
+        // agent's work → don't fabricate a memory.
+        let td = tempfile::TempDir::new().unwrap();
+        let git_dir = td.path();
+        let mut pt = PendingTrace::new("claude-code".into(), "run-1".into(), None);
+        pt.push_tool(ToolCall {
+            name: "Read".into(),
+            input_summary: "src/lib.rs".into(),
+            output_summary: "10 lines".into(),
+        });
+        trace_pending::save(git_dir, &pt).unwrap();
+
+        // No commits of its own; has_changes() is false → nothing to store even
+        // though commits are being pushed (they're the user's, not the agent's).
+        let keyed = finalize_pending_for_push(git_dir, &["a".repeat(40)]).unwrap();
+        assert!(keyed.is_none());
+        // Pending is left intact (not deleted) — it wasn't ours to finalize.
+        assert!(trace_pending::load(git_dir).unwrap().is_some());
     }
 }

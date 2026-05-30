@@ -63,8 +63,21 @@ fn post_commit_body() -> String {
 # is finalized into <git-dir>/walgit/traces/<sha>.json later, when the agent's
 # session ends. Exits 0 silently when there's no pending trace, so plain
 # `git commit` keeps working.
-if command -v walgit >/dev/null 2>&1; then
-    walgit trace snapshot >/dev/null || true
+#
+# IMPORTANT: git hooks run with a minimal PATH (GUI clients and IDEs like Cursor
+# often launch them without the user's login PATH), so `walgit` installed in
+# ~/.local/bin or ~/.cargo/bin may not be on PATH here. Resolve it explicitly
+# before falling back to PATH, otherwise the commit SHA is silently never
+# recorded and the trace can never be uploaded.
+_walgit=""
+for _c in "$HOME/.local/bin/walgit" "$HOME/.cargo/bin/walgit"; do
+    if [ -x "$_c" ]; then _walgit="$_c"; break; fi
+done
+if [ -z "$_walgit" ] && command -v walgit >/dev/null 2>&1; then
+    _walgit="walgit"
+fi
+if [ -n "$_walgit" ]; then
+    "$_walgit" trace snapshot >/dev/null 2>&1 || true
 fi
 {end}
 "#,
@@ -189,35 +202,38 @@ fn make_executable(_p: &Path) -> Result<()> {
 /// ones, marked by `<git-dir>/walgit/enabled`) and `false` for the
 /// project-local form (the project itself is the opt-in signal there).
 fn claude_managed_hooks(gated: bool) -> Value {
-    let tag = CLAUDE_HOOK_TAG;
     let gate = if gated { " --only-if-enabled" } else { "" };
+    // Like the git hook, agent hooks can run under a minimal PATH (Cursor / IDE
+    // extensions launch the agent without the user's login PATH), so a `walgit`
+    // in ~/.local/bin or ~/.cargo/bin may be invisible. Resolve it explicitly.
+    let cmd = |args: &str| -> Value {
+        json!({
+            "type": "command",
+            "command": claude_hook_command(args, gate),
+        })
+    };
     json!({
-        "SessionStart": [{
-            "hooks": [{
-                "type": "command",
-                "command": format!("walgit trace start --from-claude-hook --tag {}{} || true", tag, gate),
-            }]
-        }],
-        "UserPromptSubmit": [{
-            "hooks": [{
-                "type": "command",
-                "command": format!("walgit trace record --from-claude-hook --event user-prompt --tag {}{} || true", tag, gate),
-            }]
-        }],
-        "PostToolUse": [{
-            "matcher": ".*",
-            "hooks": [{
-                "type": "command",
-                "command": format!("walgit trace record --from-claude-hook --event post-tool-use --tag {}{} || true", tag, gate),
-            }]
-        }],
-        "Stop": [{
-            "hooks": [{
-                "type": "command",
-                "command": format!("walgit trace record --from-claude-hook --event stop --tag {}{} || true", tag, gate),
-            }]
-        }]
+        "SessionStart": [{ "hooks": [cmd("trace start --from-claude-hook")] }],
+        "UserPromptSubmit": [{ "hooks": [cmd("trace record --from-claude-hook --event user-prompt")] }],
+        "PostToolUse": [{ "matcher": ".*", "hooks": [cmd("trace record --from-claude-hook --event post-tool-use")] }],
+        "Stop": [{ "hooks": [cmd("trace record --from-claude-hook --event stop")] }]
     })
+}
+
+/// Build a single Claude Code hook command string with PATH-independent `walgit`
+/// resolution. `args` is the walgit argument string (e.g. `trace start
+/// --from-claude-hook`); `gate` is either `""` or `" --only-if-enabled"`. The
+/// [`CLAUDE_HOOK_TAG`] is always embedded so install/uninstall can recognise
+/// our entries.
+fn claude_hook_command(args: &str, gate: &str) -> String {
+    format!(
+        "w=walgit; for c in \"$HOME/.local/bin/walgit\" \"$HOME/.cargo/bin/walgit\"; do \
+         [ -x \"$c\" ] && w=\"$c\" && break; done; \
+         \"$w\" {args} --tag {tag}{gate} || true",
+        args = args,
+        tag = CLAUDE_HOOK_TAG,
+        gate = gate,
+    )
 }
 
 /// Merge our managed hook entries into `existing` settings, returning the
@@ -386,7 +402,10 @@ mod tests {
         let body = std::fs::read_to_string(&hook).unwrap();
         assert!(body.contains(SHELL_BEGIN));
         assert!(body.contains(SHELL_END));
-        assert!(body.contains("walgit trace snapshot"));
+        assert!(body.contains("trace snapshot"));
+        // PATH-independent resolution: probes the common install dirs.
+        assert!(body.contains(".local/bin/walgit"));
+        assert!(body.contains(".cargo/bin/walgit"));
     }
 
     #[test]
@@ -401,7 +420,7 @@ mod tests {
         install_git_hook(td.path()).unwrap();
         let combined = std::fs::read_to_string(&hook).unwrap();
         assert!(combined.contains("user hook ran"));
-        assert!(combined.contains("walgit trace snapshot"));
+        assert!(combined.contains("trace snapshot"));
     }
 
     #[test]

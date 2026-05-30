@@ -49,6 +49,14 @@ pub async fn upload_for_push(
     // matter for upload, but we keep `git rev-list`'s order for logging).
     let shas = revs_in_push(repo_dir, head_sha, parent_sha)?;
 
+    // Safety net: if a session is still pending (the agent's Stop never ran a
+    // clean finalize — manual/IDE commit+push, or a hook that couldn't find
+    // `walgit` on PATH), finalize it now against the pushed commits so the
+    // trace ships instead of being silently lost. May produce a snapshot with
+    // an empty `decision`; that's deliberate — task + files + commits are still
+    // worth remembering.
+    let _ = super::record::finalize_pending_for_push(git_dir, &shas);
+
     // Cross-reference against local snapshots: only those with files are
     // candidates. Missing ones are silently ignored.
     let candidates: Vec<(String, PathBuf)> = shas
